@@ -1,0 +1,25 @@
+{
+  "repositories": [
+    {
+      "name": "spring-rest",
+      "description": "Spring REST service guide",
+      "git_url": "https://github.com/spring-guides/gs-rest-service.git",
+      "branch": "main",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "itsdangerous",
+      "description": "Python signing library",
+      "git_url": "https://github.com/pallets/itsdangerous.git",
+      "branch": "main",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "tslib",
+      "description": "TypeScript runtime helper library",
+      "git_url": "https://github.com/microsoft/tslib.git",
+      "branch": "main",
+      "license": "0BSD"
+    }
+  ]
+}
