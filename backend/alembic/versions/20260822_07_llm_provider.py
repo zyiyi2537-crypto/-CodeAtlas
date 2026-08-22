@@ -1,6 +1,7 @@
 """Add persisted OpenAI-compatible LLM providers."""
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "20260822_07"
