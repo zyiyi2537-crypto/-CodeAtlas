@@ -1,0 +1,361 @@
+---
+import { getCollection } from 'astro:content'
+
+import BaseLayout from '../layouts/BaseLayout.astro'
+
+const posts = (await getCollection('articles')).sort(
+  (left, right) => right.data.publishedAt.valueOf() - left.data.publishedAt.valueOf(),
+)
+const featured = posts.find((post) => post.data.featured) ?? posts[0]
+const jsonLd = {
+  '@context': 'https://schema.org',
+  '@type': 'SoftwareApplication',
+  name: 'CodeAtlas',
+  applicationCategory: 'DeveloperApplication',
+  operatingSystem: 'Linux',
+  description: '企业级私有代码知识库、混合检索与 MCP 服务。',
+  url: new URL('/lab/code-kb/', Astro.site).toString(),
+}
+---
+
+<BaseLayout>
+  <script is:inline type="application/ld+json" set:html={JSON.stringify(jsonLd)} />
+  <section class="hero">
+    <img
+      src="/images/codeatlas-search.png"
+      alt="CodeAtlas 代码搜索界面"
+      width="1440"
+      height="900"
+      loading="eager"
+      fetchpriority="high"
+    />
+    <div class="hero-shade" aria-hidden="true"></div>
+    <div class="hero-content">
+      <p>PRIVATE CODE KNOWLEDGE BASE</p>
+      <h1>CodeAtlas</h1>
+      <strong>让私有代码可以被检索、验证和安全调用。</strong>
+      <div class="hero-actions">
+        <a class="primary-action" href="/lab/code-kb/">进入检索 Demo</a>
+        {featured && <a class="text-action" href={`/articles/${featured.id}/`}>阅读项目案例 <span>→</span></a>}
+      </div>
+    </div>
+  </section>
+
+  <section class="architecture-band" aria-label="技术架构">
+    <div>
+      <span>01</span>
+      <strong>Versioned indexing</strong>
+      <p>索引版本全部写入成功后原子切换，失败继续使用上一版本。</p>
+    </div>
+    <div>
+      <span>02</span>
+      <strong>Hybrid retrieval</strong>
+      <p>向量 Top 50 与 MySQL FULLTEXT Top 50 经 RRF 融合和重叠抑制。</p>
+    </div>
+    <div>
+      <span>03</span>
+      <strong>Token-scoped MCP</strong>
+      <p>仓库级范围、独立权限和只存哈希的 API Token。</p>
+    </div>
+  </section>
+
+  <section id="articles" class="article-section">
+    <header>
+      <div>
+        <p>ENGINEERING LOG</p>
+        <h2>项目与架构笔记</h2>
+      </div>
+      <a href="/rss.xml">RSS</a>
+    </header>
+    <div class="article-grid">
+      {posts.map((post, index) => (
+        <article class:list={['article-card', { featured: index === 0 }]}>
+          <div class="article-index">{String(index + 1).padStart(2, '0')}</div>
+          <div>
+            <div class="article-meta">
+              <time datetime={post.data.publishedAt.toISOString()}>
+                {post.data.publishedAt.toLocaleDateString('zh-CN')}
+              </time>
+              <span>{post.data.tags[0]}</span>
+            </div>
+            <h3><a href={`/articles/${post.id}/`}>{post.data.title}</a></h3>
+            <p>{post.data.description}</p>
+          </div>
+          <a class="article-arrow" href={`/articles/${post.id}/`} aria-label={`阅读 ${post.data.title}`}>→</a>
+        </article>
+      ))}
+    </div>
+  </section>
+
+  <section class="project-proof">
+    <div class="proof-copy">
+      <p>IMPLEMENTED SYSTEM</p>
+      <h2>从 Git 提交到可引用的代码证据</h2>
+      <dl>
+        <div><dt>解析</dt><dd>Tree-sitter + bounded text windows</dd></div>
+        <div><dt>存储</dt><dd>MySQL 8 · FULLTEXT · Chroma</dd></div>
+        <div><dt>接口</dt><dd>FastAPI · MCP Streamable HTTP</dd></div>
+        <div><dt>边界</dt><dd>RBAC · SSRF guard · path isolation</dd></div>
+      </dl>
+    </div>
+    <figure>
+      <img src="/images/codeatlas-search.png" alt="CodeAtlas 搜索结果与代码证据" loading="lazy" />
+      <figcaption>真实运行的公开脱敏 Demo</figcaption>
+    </figure>
+  </section>
+</BaseLayout>
+
+<style>
+  .hero {
+    position: relative;
+    min-height: min(680px, 72vh);
+    display: flex;
+    align-items: center;
+    overflow: hidden;
+    color: #ffffff;
+    background: #1c2522;
+  }
+
+  .hero > img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    object-position: center top;
+  }
+
+  .hero-shade {
+    position: absolute;
+    inset: 0;
+    background: rgba(13, 20, 18, 0.54);
+  }
+
+  .hero-content {
+    position: relative;
+    z-index: 2;
+    width: min(1180px, calc(100% - 48px));
+    margin: 0 auto;
+  }
+
+  .hero-content > p,
+  .article-section header p,
+  .proof-copy > p {
+    margin: 0;
+    color: #8ed3b8;
+    font-size: 11px;
+    font-weight: 760;
+  }
+
+  .hero h1 {
+    margin: 12px 0 16px;
+    font-size: 68px;
+    line-height: 0.96;
+  }
+
+  .hero-content > strong {
+    display: block;
+    max-width: 600px;
+    color: #e7eeeb;
+    font-size: 19px;
+    font-weight: 520;
+    line-height: 1.6;
+  }
+
+  .hero-actions {
+    display: flex;
+    align-items: center;
+    gap: 22px;
+    margin-top: 30px;
+  }
+
+  .primary-action {
+    min-height: 42px;
+    display: inline-flex;
+    align-items: center;
+    padding: 0 16px;
+    color: #153428;
+    background: #a8e1c9;
+    border-radius: 5px;
+    font-size: 13px;
+    font-weight: 720;
+  }
+
+  .primary-action:hover { background: #c0ecd9; }
+
+  .text-action {
+    color: #ffffff;
+    font-size: 13px;
+    font-weight: 650;
+  }
+
+  .text-action span { margin-left: 6px; }
+
+  .architecture-band {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    background: #ffffff;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .architecture-band > div {
+    min-height: 160px;
+    padding: 28px max(24px, calc((100vw - 1180px) / 6));
+    border-right: 1px solid var(--border);
+  }
+
+  .architecture-band > div:last-child { border-right: 0; }
+
+  .architecture-band span {
+    display: block;
+    margin-bottom: 14px;
+    color: var(--accent);
+    font-family: "SFMono-Regular", Consolas, monospace;
+    font-size: 11px;
+  }
+
+  .architecture-band strong { font-size: 14px; }
+
+  .architecture-band p {
+    margin: 8px 0 0;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.65;
+  }
+
+  .article-section,
+  .project-proof {
+    width: min(1180px, calc(100% - 48px));
+    margin: 0 auto;
+    padding: 86px 0;
+  }
+
+  .article-section > header {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 24px;
+    margin-bottom: 28px;
+  }
+
+  .article-section h2,
+  .project-proof h2 {
+    margin: 7px 0 0;
+    font-size: 30px;
+  }
+
+  .article-section > header > a {
+    color: var(--blue);
+    font-size: 12px;
+  }
+
+  .article-grid {
+    border-top: 1px solid #bdc7cb;
+  }
+
+  .article-card {
+    min-height: 180px;
+    display: grid;
+    grid-template-columns: 50px minmax(0, 1fr) 30px;
+    gap: 18px;
+    padding: 28px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .article-card:hover { background: #f0f4f3; }
+
+  .article-index {
+    color: var(--accent);
+    font-family: "SFMono-Regular", Consolas, monospace;
+    font-size: 12px;
+  }
+
+  .article-meta {
+    display: flex;
+    gap: 15px;
+    color: var(--muted);
+    font-size: 11px;
+  }
+
+  .article-card h3 {
+    margin: 13px 0 9px;
+    font-size: 21px;
+  }
+
+  .article-card h3 a:hover { color: var(--accent); }
+
+  .article-card p {
+    max-width: 740px;
+    margin: 0;
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.7;
+  }
+
+  .article-arrow {
+    align-self: center;
+    color: var(--accent);
+    font-size: 20px;
+  }
+
+  .project-proof {
+    display: grid;
+    grid-template-columns: minmax(280px, 0.8fr) minmax(0, 1.4fr);
+    align-items: center;
+    gap: 64px;
+    border-top: 1px solid var(--border);
+  }
+
+  .proof-copy dl {
+    margin: 30px 0 0;
+    border-top: 1px solid var(--border);
+  }
+
+  .proof-copy dl > div {
+    display: grid;
+    grid-template-columns: 70px 1fr;
+    gap: 12px;
+    padding: 13px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+  }
+
+  .proof-copy dt { color: var(--muted); }
+  .proof-copy dd { margin: 0; font-family: "SFMono-Regular", Consolas, monospace; }
+
+  .project-proof figure { margin: 0; }
+
+  .project-proof figure img {
+    width: 100%;
+    display: block;
+    aspect-ratio: 16 / 10;
+    object-fit: cover;
+    object-position: top left;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+
+  .project-proof figcaption {
+    margin-top: 9px;
+    color: var(--muted);
+    font-size: 11px;
+  }
+
+  @media (max-width: 760px) {
+    .hero { min-height: 62vh; }
+    .hero-content,
+    .article-section,
+    .project-proof { width: calc(100% - 28px); }
+    .hero h1 { font-size: 48px; }
+    .hero-content > strong { font-size: 16px; }
+    .hero-actions { align-items: flex-start; flex-direction: column; gap: 14px; }
+    .architecture-band { grid-template-columns: 1fr; }
+    .architecture-band > div { min-height: 128px; border-right: 0; border-bottom: 1px solid var(--border); }
+    .article-section,
+    .project-proof { padding: 58px 0; }
+    .article-section h2,
+    .project-proof h2 { font-size: 25px; }
+    .article-card { grid-template-columns: 34px minmax(0, 1fr) 20px; gap: 10px; }
+    .project-proof { grid-template-columns: 1fr; gap: 34px; }
+  }
+</style>

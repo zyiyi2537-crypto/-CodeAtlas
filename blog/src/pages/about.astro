@@ -1,0 +1,34 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro'
+---
+
+<BaseLayout title="关于" description="CodeAtlas 项目边界、技术选择与公开 Demo 说明。">
+  <article class="about-page">
+    <p class="eyebrow">ABOUT THE PROJECT</p>
+    <h1>关于 CodeAtlas</h1>
+    <p class="lead">CodeAtlas 是一个面向私有代码的版本化知识库与 MCP 检索服务。公开站点只使用许可证宽松的开源仓库，私有部署则以仓库授权和 Token 范围隔离访问。</p>
+    <section>
+      <h2>项目边界</h2>
+      <p>系统负责 Git 同步、代码解析、秘密脱敏、混合检索、权限控制和可审计的 MCP 工具调用。首版刻意不包含 AI 对话，也不引入 Redis、PostgreSQL、MinIO 或 Milvus，以控制单机部署的资源和运维复杂度。</p>
+    </section>
+    <section>
+      <h2>技术选择</h2>
+      <p>FastAPI 承载 REST 与 Streamable HTTP，MySQL 8 保存业务状态并通过 FULLTEXT 提供词法检索，Chroma 保存向量。Java、Python、JavaScript 与 TypeScript 使用 Tree-sitter，其他文本格式按限长窗口切片。</p>
+    </section>
+    <section>
+      <h2>公开数据</h2>
+      <p>Demo 仓库保留上游地址、分支和许可证信息。索引结果返回提交号、路径、符号、行号、代码片段与命中来源，方便回到原始证据。</p>
+    </section>
+  </article>
+</BaseLayout>
+
+<style>
+  .about-page { width: min(760px, calc(100% - 48px)); margin: 0 auto; padding: 88px 0 110px; }
+  .eyebrow { margin: 0; color: var(--accent); font-size: 11px; font-weight: 760; }
+  h1 { margin: 10px 0 22px; font-size: 42px; }
+  .lead { color: #3f4a50; font-size: 18px; line-height: 1.8; }
+  section { margin-top: 52px; padding-top: 22px; border-top: 1px solid var(--border); }
+  h2 { margin: 0 0 14px; font-size: 20px; }
+  section p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.9; }
+  @media (max-width: 640px) { .about-page { width: calc(100% - 28px); padding: 58px 0 80px; } h1 { font-size: 34px; } }
+</style>
