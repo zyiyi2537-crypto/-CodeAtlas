@@ -1,0 +1,213 @@
+---
+import { getCollection, render, type CollectionEntry } from 'astro:content'
+
+import BaseLayout from '../../layouts/BaseLayout.astro'
+
+export async function getStaticPaths() {
+  const posts = await getCollection('articles')
+  return posts.map((post) => ({ params: { slug: post.id }, props: { post } }))
+}
+
+interface Props {
+  post: CollectionEntry<'articles'>
+}
+
+const { post } = Astro.props
+const { Content, headings } = await render(post)
+const articleJsonLd = {
+  '@context': 'https://schema.org',
+  '@type': 'TechArticle',
+  headline: post.data.title,
+  description: post.data.description,
+  datePublished: post.data.publishedAt.toISOString(),
+  dateModified: (post.data.updatedAt ?? post.data.publishedAt).toISOString(),
+  mainEntityOfPage: Astro.url.toString(),
+  author: { '@type': 'Organization', name: 'CodeAtlas' },
+}
+---
+
+<BaseLayout title={post.data.title} description={post.data.description} article>
+  <script is:inline type="application/ld+json" set:html={JSON.stringify(articleJsonLd)} />
+  <div class="article-shell">
+    <article>
+      <header class="article-header">
+        <div class="article-kicker">
+          <span>{post.data.tags[0]}</span>
+          <time datetime={post.data.publishedAt.toISOString()}>
+            {post.data.publishedAt.toLocaleDateString('zh-CN')}
+          </time>
+        </div>
+        <h1>{post.data.title}</h1>
+        <p>{post.data.description}</p>
+      </header>
+      <div class="article-body">
+        <Content />
+      </div>
+    </article>
+    <aside aria-label="文章目录">
+      <strong>目录</strong>
+      <nav>
+        {headings.filter((heading) => heading.depth <= 3).map((heading) => (
+          <a class:list={[`depth-${heading.depth}`]} href={`#${heading.slug}`}>{heading.text}</a>
+        ))}
+      </nav>
+      <a class="demo-cta" href="/lab/code-kb/">进入 CodeAtlas 控制台 →</a>
+    </aside>
+  </div>
+</BaseLayout>
+
+<style is:global>
+  .article-shell {
+    width: min(1120px, calc(100% - 48px));
+    display: grid;
+    grid-template-columns: minmax(0, 760px) 220px;
+    gap: 80px;
+    margin: 0 auto;
+    padding: 78px 0 110px;
+  }
+
+  .article-header {
+    padding-bottom: 38px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .article-kicker {
+    display: flex;
+    gap: 14px;
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 700;
+  }
+
+  .article-kicker time { color: var(--muted); }
+
+  .article-header h1 {
+    margin: 14px 0 18px;
+    font-size: 42px;
+    line-height: 1.2;
+  }
+
+  .article-header > p {
+    margin: 0;
+    color: #47535a;
+    font-size: 17px;
+    line-height: 1.75;
+  }
+
+  .article-body { padding-top: 28px; }
+
+  .article-body h2 {
+    margin: 54px 0 18px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    font-size: 25px;
+  }
+
+  .article-body h3 { margin: 36px 0 12px; font-size: 18px; }
+
+  .article-body p,
+  .article-body li {
+    color: #3e494f;
+    font-size: 15px;
+    line-height: 1.9;
+  }
+
+  .article-body ul,
+  .article-body ol { padding-left: 23px; }
+
+  .article-body li + li { margin-top: 7px; }
+
+  .article-body a { color: var(--blue); text-decoration: underline; text-underline-offset: 3px; }
+
+  .article-body blockquote {
+    margin: 26px 0;
+    padding: 3px 0 3px 18px;
+    color: #3c5048;
+    border-left: 3px solid var(--accent);
+  }
+
+  .article-body blockquote p { margin: 0; }
+
+  .article-body pre {
+    overflow-x: auto;
+    padding: 18px;
+    border-radius: 6px;
+    font-size: 12px;
+    line-height: 1.65;
+  }
+
+  .article-body :not(pre) > code {
+    padding: 2px 5px;
+    color: #275141;
+    background: #e7f1ed;
+    border-radius: 3px;
+    font-size: 0.9em;
+  }
+
+  .article-body table {
+    width: 100%;
+    overflow-x: auto;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+
+  .article-body th,
+  .article-body td {
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    text-align: left;
+  }
+
+  .article-body th { background: #eef2f3; }
+
+  .article-shell > aside {
+    position: sticky;
+    top: 92px;
+    height: fit-content;
+    padding-top: 13px;
+    border-top: 2px solid #27312e;
+  }
+
+  .article-shell > aside > strong { font-size: 12px; }
+
+  .article-shell > aside nav {
+    display: grid;
+    gap: 10px;
+    margin-top: 15px;
+  }
+
+  .article-shell > aside nav a {
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.45;
+  }
+
+  .article-shell > aside nav a:hover { color: var(--accent); }
+  .article-shell > aside nav a.depth-3 { padding-left: 12px; }
+
+  .demo-cta {
+    min-height: 38px;
+    display: flex;
+    align-items: center;
+    margin-top: 26px;
+    padding: 0 10px;
+    color: var(--accent-dark);
+    background: #e4f1eb;
+    border-radius: 5px;
+    font-size: 11px;
+    font-weight: 700;
+  }
+
+  @media (max-width: 880px) {
+    .article-shell { grid-template-columns: 1fr; }
+    .article-shell > aside { display: none; }
+  }
+
+  @media (max-width: 640px) {
+    .article-shell { width: calc(100% - 28px); padding: 52px 0 78px; }
+    .article-header h1 { font-size: 33px; }
+    .article-header > p { font-size: 15px; }
+    .article-body p,
+    .article-body li { font-size: 14px; }
+  }
+</style>

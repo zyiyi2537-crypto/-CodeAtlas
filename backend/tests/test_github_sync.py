@@ -1,0 +1,49 @@
+from __future__ import annotations
+
+from sqlmodel import Session, select
+
+from codeatlas.github import generate_deploy_key
+from codeatlas.github_sync import GitHubSyncCoordinator
+from codeatlas.models import GitHubSource, IndexJob, Repository
+
+
+def test_github_sync_queues_changed_commit(application, admin, monkeypatch) -> None:
+    _key_id, _public_key, key_path = generate_deploy_key(application.state.settings)
+    with Session(application.state.engine) as session:
+        repo = Repository(
+            name="hello-world",
+            git_url="git@github.com:octocat/Hello-World.git",
+            branch="main",
+            visibility="public",
+            created_by=admin.id,
+            last_commit="old-commit",
+        )
+        session.add(repo)
+        session.flush()
+        source = GitHubSource(
+            name="octocat-source",
+            repo_url=repo.git_url,
+            owner="octocat",
+            repository="Hello-World",
+            branch="main",
+            repository_id=repo.id,
+            ssh_key_path=key_path,
+            created_by=admin.id,
+        )
+        session.add(source)
+        session.commit()
+        session.refresh(source)
+        source_id = source.id
+        repo_id = repo.id
+
+    monkeypatch.setattr(
+        "codeatlas.github_sync.remote_commit",
+        lambda *_args: "new-commit",
+    )
+    coordinator = GitHubSyncCoordinator(application.state.settings, application.state.engine)
+    assert coordinator.check_source(source_id) == 1
+    assert coordinator.check_source(source_id) == 0
+    with Session(application.state.engine) as session:
+        jobs = session.exec(select(IndexJob).where(IndexJob.repository_id == repo_id)).all()
+        assert len(jobs) == 1
+        assert jobs[0].message == "Queued by GitHub commit check"

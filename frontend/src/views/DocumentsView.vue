@@ -1,0 +1,92 @@
+<script setup lang="ts">
+import { useMutation, useQuery, useQueryClient } from '@tanstack/vue-query'
+import { FileText, FolderPlus, Upload, X } from 'lucide-vue-next'
+import { ref } from 'vue'
+
+import { api, errorMessage } from '@/api'
+import { csrfHeaders } from '@/auth'
+import EmptyState from '@/components/EmptyState.vue'
+
+interface Collection { id: string; name: string; description: string }
+interface DocumentItem { id: string; title: string; status: string; version: number; chunk_count: number }
+
+const queryClient = useQueryClient()
+const selectedCollection = ref('')
+const showCreate = ref(false)
+const collectionName = ref('')
+const collectionDescription = ref('')
+const fileInput = ref<HTMLInputElement | null>(null)
+const error = ref('')
+
+const collections = useQuery({
+  queryKey: ['document-collections'],
+  queryFn: async () => (await api.get<Collection[]>('/document-collections')).data,
+})
+
+const documents = useQuery({
+  queryKey: ['documents', selectedCollection],
+  queryFn: async () => (await api.get<DocumentItem[]>(`/document-collections/${selectedCollection.value}/documents`)).data,
+  enabled: () => Boolean(selectedCollection.value),
+})
+
+const createCollection = useMutation({
+  mutationFn: async () => (await api.post('/document-collections', { name: collectionName.value, description: collectionDescription.value }, { headers: csrfHeaders() })).data as Collection,
+  onSuccess: async (data) => {
+    showCreate.value = false
+    selectedCollection.value = data.id
+    collectionName.value = ''
+    collectionDescription.value = ''
+    await queryClient.invalidateQueries({ queryKey: ['document-collections'] })
+  },
+  onError: (e) => { error.value = errorMessage(e) },
+})
+
+const uploadDocument = useMutation({
+  mutationFn: async (file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    const response = await api.post(`/document-collections/${selectedCollection.value}/documents`, form, { headers: csrfHeaders() })
+    return response.data
+  },
+  onSuccess: async () => queryClient.invalidateQueries({ queryKey: ['documents', selectedCollection.value] }),
+  onError: (e) => { error.value = errorMessage(e) },
+})
+
+function chooseFile() { fileInput.value?.click() }
+function onFileChange(event: Event) {
+  const file = (event.target as HTMLInputElement).files?.[0]
+  if (file && selectedCollection.value) uploadDocument.mutate(file)
+  if (fileInput.value) fileInput.value.value = ''
+}
+</script>
+
+<template>
+  <div class="page-container">
+    <section class="page-heading">
+      <div><p class="eyebrow">DOCUMENT KNOWLEDGE</p><h1>项目文档</h1></div>
+      <div class="heading-actions">
+        <button class="secondary-button" type="button" :disabled="!selectedCollection" @click="chooseFile"><Upload :size="16" />上传文档</button>
+        <button class="command-button" type="button" @click="showCreate = true"><FolderPlus :size="16" />新建文档集</button>
+      </div>
+    </section>
+    <input ref="fileInput" class="visually-hidden" type="file" accept=".md,.markdown,.txt,.csv,.docx,.xlsx" @change="onFileChange" />
+    <div v-if="error" class="error-banner">{{ error }} <button class="icon-button" type="button" aria-label="关闭" @click="error = ''"><X :size="15" /></button></div>
+    <section class="data-section">
+      <div class="section-heading"><h2>文档集</h2><span>原文件保留，抽取内容用于检索</span></div>
+      <div v-if="collections.data.value?.length" class="source-card-grid">
+        <button v-for="collection in collections.data.value" :key="collection.id" class="source-card" :class="{ selected: selectedCollection === collection.id }" type="button" @click="selectedCollection = collection.id">
+          <span class="source-card-icon"><FileText :size="19" /></span><span class="source-card-main"><strong>{{ collection.name }}</strong><small>{{ collection.description || '暂无描述' }}</small></span>
+        </button>
+      </div>
+      <EmptyState v-else title="暂无文档集" description="先建立一个文档集，再上传项目开发文档。" />
+    </section>
+    <section v-if="selectedCollection" class="data-section">
+      <div class="section-heading"><h2>已上传文档</h2><span>支持 Markdown、TXT、CSV、DOCX、XLSX</span></div>
+      <div v-if="documents.data.value?.length" class="gitlab-project-list">
+        <div v-for="document in documents.data.value" :key="document.id" class="gitlab-project-row"><FileText :size="18" /><span><strong>{{ document.title }}</strong><small>版本 {{ document.version }} · {{ document.chunk_count }} 个检索片段</small></span><span>{{ document.status }}</span></div>
+      </div>
+      <EmptyState v-else title="文档集为空" description="上传 Word、Excel、Markdown 或文本文件后会自动抽取并建立检索片段。" />
+    </section>
+    <div v-if="showCreate" class="preview-backdrop" role="presentation" @click.self="showCreate = false"><section class="form-dialog" role="dialog" aria-modal="true"><header class="dialog-header"><h2>新建文档集</h2><button class="icon-button" type="button" aria-label="关闭" @click="showCreate = false"><X :size="18" /></button></header><form class="stack-form" @submit.prevent="createCollection.mutate()"><label><span>名称</span><input v-model="collectionName" required /></label><label><span>描述</span><textarea v-model="collectionDescription" rows="3" /></label><div class="form-actions"><button class="secondary-button" type="button" @click="showCreate = false">取消</button><button class="command-button" type="submit">创建</button></div></form></section></div>
+  </div>
+</template>

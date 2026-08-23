@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CodeAtlas 设计稿 · 代码搜索</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="lucide.min.js"></script>
+<style>
+:root {
+  --paper: #f3f4f0;
+  --surface: #fbfbf8;
+  --ink: #22303a;
+  --slate: #5b6b76;
+  --faint: #8b979e;
+  --line: #d8dcd7;
+  --line-strong: #c3c9c2;
+  --vermilion: #c2401f;
+  --vermilion-deep: #9e3115;
+  --vermilion-wash: #f7e6df;
+  --pine: #2c6e57;
+  --pine-wash: #e4efe8;
+  --amber: #96690f;
+  --mono: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+  --serif: "Noto Serif SC", "Source Han Serif SC", "SimSun", serif;
+  --sans: -apple-system, "Segoe UI", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  --radius: 4px;
+}
+
+* { box-sizing: border-box; letter-spacing: 0; }
+html, body { margin: 0; min-height: 100%; }
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: inherit; text-decoration: none; }
+button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+:focus-visible { outline: 2px solid var(--vermilion); outline-offset: 2px; border-radius: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
+
+.mono { font-family: var(--mono); }
+
+/* ---------- shell ---------- */
+.shell { min-height: 100vh; display: flex; flex-direction: column; }
+
+.topbar {
+  height: 54px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 20px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  position: relative;
+  z-index: 5;
+}
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 15px; }
+.brand-mark {
+  width: 30px; height: 30px;
+  display: grid; place-items: center;
+  background: var(--ink); color: var(--paper);
+  border-radius: 3px;
+  font-family: var(--mono); font-size: 12px; font-weight: 500;
+}
+.topbar-spacer { flex: 1; }
+.index-pill {
+  display: inline-flex; align-items: center; gap: 8px;
+  height: 30px; padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  font-family: var(--mono); font-size: 12px; color: var(--slate);
+}
+.index-pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--pine); }
+.icon-button {
+  width: 32px; height: 32px;
+  display: grid; place-items: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  color: var(--slate);
+}
+.icon-button:hover { border-color: var(--line); color: var(--ink); background: var(--paper); }
+
+.frame { flex: 1; display: flex; min-height: 0; }
+
+/* ---------- sidebar as map legend ---------- */
+.legend {
+  flex: 0 0 228px;
+  display: flex; flex-direction: column;
+  background: var(--surface);
+  border-right: 1px solid var(--line);
+  padding: 18px 12px 14px;
+}
+.legend-group { margin-bottom: 20px; }
+.legend-group > h2 {
+  margin: 0 0 6px;
+  padding: 0 10px;
+  font-family: var(--mono); font-size: 11px; font-weight: 500;
+  color: var(--faint);
+}
+.legend-group > h2 .sheet-letter {
+  display: inline-grid; place-items: center;
+  width: 16px; height: 16px; margin-right: 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 2px;
+  color: var(--slate);
+}
+.nav-item {
+  position: relative;
+  display: flex; align-items: center; gap: 10px;
+  height: 34px; padding: 0 10px;
+  border-radius: var(--radius);
+  color: var(--slate);
+  font-size: 13.5px;
+}
+.nav-item:hover { background: var(--paper); color: var(--ink); }
+.nav-item.active { background: var(--ink); color: var(--paper); font-weight: 600; }
+.nav-item.active .bench {
+  position: absolute; left: -4px; top: 50%;
+  width: 9px; height: 9px;
+  transform: translateY(-50%) rotate(45deg);
+  background: var(--vermilion);
+}
+.account-block {
+  margin-top: auto;
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 10px 2px;
+  border-top: 1px solid var(--line);
+}
+.avatar {
+  width: 32px; height: 32px; flex: 0 0 auto;
+  display: grid; place-items: center;
+  border: 1px solid var(--ink);
+  border-radius: 50%;
+  font-family: var(--serif); font-weight: 700; font-size: 14px;
+}
+.account-copy { flex: 1; min-width: 0; line-height: 1.3; }
+.account-copy strong { display: block; font-size: 13px; }
+.account-copy span { font-size: 12px; color: var(--faint); }
+
+/* ---------- main ---------- */
+.workbench { flex: 1; min-width: 0; padding: 0 36px 48px; }
+.workbench-inner { max-width: 1080px; margin: 0 auto; }
+
+.sheet-head {
+  position: relative;
+  margin: 0 -36px 0;
+  padding: 34px 36px 26px;
+  border-bottom: 1px solid var(--line);
+  overflow: hidden;
+}
+.sheet-head::before {
+  content: "";
+  position: absolute; inset: 0;
+  background-image:
+    linear-gradient(rgba(34, 48, 58, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(34, 48, 58, 0.05) 1px, transparent 1px);
+  background-size: 28px 28px;
+  -webkit-mask-image: linear-gradient(180deg, rgba(0,0,0,0.9), transparent 92%);
+  mask-image: linear-gradient(180deg, rgba(0,0,0,0.9), transparent 92%);
+  pointer-events: none;
+}
+.sheet-head > * { position: relative; }
+.eyebrow {
+  margin: 0 0 8px;
+  font-family: var(--mono); font-size: 11px; font-weight: 500;
+  color: var(--vermilion);
+}
+.sheet-head h1 {
+  margin: 0 0 10px;
+  font-family: var(--serif);
+  font-size: 30px; font-weight: 700; line-height: 1.2;
+}
+.sheet-info {
+  margin: 0;
+  font-family: var(--mono); font-size: 12px; color: var(--slate);
+}
+.sheet-info b { color: var(--ink); font-weight: 500; }
+.sheet-info .sep { margin: 0 10px; color: var(--line-strong); }
+
+/* ---------- search instrument ---------- */
+.survey-input { margin-top: 26px; }
+.search-form {
+  display: flex; align-items: center; gap: 10px;
+  height: 52px;
+  padding: 0 8px 0 16px;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  transition: border-color 120ms ease;
+}
+.search-form:focus-within { border-color: var(--ink); }
+.search-form .leading-icon { color: var(--faint); flex: 0 0 auto; }
+.search-form input {
+  flex: 1; min-width: 0;
+  height: 100%;
+  border: 0; background: transparent;
+  font-size: 15px; color: var(--ink);
+}
+.search-form input::placeholder { color: var(--faint); }
+.search-form input:focus { outline: none; }
+.search-submit {
+  flex: 0 0 auto;
+  display: inline-flex; align-items: center; gap: 8px;
+  height: 36px; padding: 0 18px;
+  background: var(--vermilion); color: #fff;
+  border-radius: var(--radius);
+  font-weight: 600; font-size: 14px;
+}
+.search-submit:hover { background: var(--vermilion-deep); }
+
+.filter-row {
+  display: flex; flex-wrap: wrap; gap: 10px;
+  margin-top: 12px;
+}
+.filter-row label {
+  display: inline-flex; align-items: center; gap: 8px;
+  height: 34px; padding: 0 4px 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--slate); font-size: 13px;
+}
+.filter-row select {
+  height: 100%;
+  border: 0; background: transparent;
+  font: inherit; color: var(--ink);
+  padding-right: 8px;
+}
+.filter-row select:focus { outline: none; }
+.filter-clear {
+  margin-left: auto;
+  font-size: 13px; color: var(--slate);
+  padding: 0 10px; border-radius: var(--radius);
+}
+.filter-clear:hover { color: var(--vermilion); }
+
+/* ---------- results ---------- */
+.results-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 264px;
+  gap: 28px;
+  margin-top: 26px;
+  align-items: start;
+}
+
+.result-count {
+  display: flex; align-items: baseline; gap: 10px;
+  margin: 0 0 14px;
+  font-size: 13px; color: var(--slate);
+}
+.result-count strong { font-family: var(--mono); font-size: 15px; color: var(--ink); }
+
+.result {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.result + .result { margin-top: 12px; }
+.result-head {
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 14px 16px 12px;
+}
+.pin {
+  flex: 0 0 auto;
+  width: 10px; height: 10px;
+  margin-top: 5px;
+  transform: rotate(45deg);
+  background: var(--vermilion);
+}
+.result.pin-pine .pin { background: var(--pine); }
+.result-title { flex: 1; min-width: 0; }
+.result-title h3 {
+  margin: 0 0 6px;
+  font-family: var(--mono); font-size: 14px; font-weight: 500;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.result-title h3 .dirname { color: var(--faint); }
+.result-meta {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  margin: 0;
+  font-family: var(--mono); font-size: 11.5px; color: var(--slate);
+}
+.chip {
+  display: inline-flex; align-items: center;
+  height: 20px; padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--paper);
+  color: var(--slate);
+}
+.chip.coord { border-color: var(--ink); color: var(--ink); font-weight: 500; }
+.chip.lang { color: var(--pine); border-color: #bcd4c8; background: var(--pine-wash); }
+.result-actions { display: flex; gap: 2px; flex: 0 0 auto; }
+
+.snippet {
+  margin: 0;
+  padding: 12px 16px 14px;
+  border-top: 1px solid var(--line);
+  background: var(--paper);
+  border-radius: 0 0 var(--radius) var(--radius);
+  overflow-x: auto;
+}
+.snippet code {
+  display: grid;
+  grid-template-columns: 44px 1fr;
+  font-family: var(--mono); font-size: 12.5px; line-height: 1.7;
+}
+.snippet .ln { color: var(--faint); user-select: none; padding-right: 14px; text-align: right; }
+.snippet mark {
+  background: var(--vermilion-wash);
+  color: var(--vermilion-deep);
+  font-weight: 500;
+  border-bottom: 1px solid var(--vermilion);
+  padding: 0 1px;
+}
+.result-foot {
+  display: flex; align-items: center; gap: 14px;
+  padding: 10px 16px;
+  border-top: 1px dashed var(--line);
+  font-size: 12.5px; color: var(--slate);
+}
+.result-foot .spacer { flex: 1; }
+.text-button {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 26px; padding: 0 8px;
+  border-radius: 3px;
+  color: var(--slate); font-size: 12.5px;
+}
+.text-button:hover { color: var(--vermilion); background: var(--vermilion-wash); }
+.score { font-family: var(--mono); font-size: 11.5px; color: var(--faint); }
+
+/* ---------- right rail ---------- */
+.rail { display: grid; gap: 16px; position: sticky; top: 16px; }
+.rail-panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 16px 16px;
+}
+.rail-panel > h2 {
+  margin: 0 0 10px;
+  font-family: var(--mono); font-size: 11px; font-weight: 500;
+  color: var(--faint);
+}
+.spec-row {
+  display: flex; justify-content: space-between; gap: 12px;
+  padding: 5px 0;
+  border-bottom: 1px dashed var(--line);
+  font-size: 13px; color: var(--slate);
+}
+.spec-row:last-child { border-bottom: 0; }
+.spec-row .val { font-family: var(--mono); font-size: 12px; color: var(--ink); }
+.dist-row { margin-bottom: 10px; }
+.dist-row:last-child { margin-bottom: 0; }
+.dist-label {
+  display: flex; justify-content: space-between;
+  margin-bottom: 4px;
+  font-family: var(--mono); font-size: 11.5px; color: var(--slate);
+}
+.dist-bar { height: 6px; background: var(--paper); border: 1px solid var(--line); border-radius: 999px; overflow: hidden; }
+.dist-fill { height: 100%; background: var(--pine); }
+.rail-hint { font-size: 12.5px; color: var(--slate); line-height: 1.6; }
+.rail-hint .bench-inline { color: var(--vermilion); font-weight: 700; }
+
+@media (max-width: 1100px) {
+  .results-grid { grid-template-columns: minmax(0, 1fr); }
+  .rail { position: static; }
+}
+@media (max-width: 900px) {
+  .legend { display: none; }
+  .workbench { padding: 0 20px 40px; }
+  .sheet-head { margin: 0 -20px 0; padding: 26px 20px 20px; }
+  .sheet-head h1 { font-size: 24px; }
+}
+</style>
+</head>
+<body>
+<div class="shell">
+  <header class="topbar">
+    <a class="brand" href="#">
+      <span class="brand-mark">CA</span>
+      <span>CodeAtlas</span>
+    </a>
+    <div class="topbar-spacer"></div>
+    <span class="index-pill"><span class="dot"></span>索引正常 · v2f81c9</span>
+    <button class="icon-button" type="button" aria-label="技术博客"><i data-lucide="book-open" style="width:17px;height:17px"></i></button>
+  </header>
+
+  <div class="frame">
+    <aside class="legend" aria-label="导航">
+      <div class="legend-group">
+        <h2><span class="sheet-letter">A</span>检索工作台</h2>
+        <a class="nav-item active" href="#"><span class="bench"></span><i data-lucide="search" style="width:16px;height:16px"></i><span>代码搜索</span></a>
+        <a class="nav-item" href="#"><i data-lucide="message-square-text" style="width:16px;height:16px"></i><span>代码问答</span></a>
+        <a class="nav-item" href="#"><i data-lucide="folder-tree" style="width:16px;height:16px"></i><span>代码浏览</span></a>
+      </div>
+      <div class="legend-group">
+        <h2><span class="sheet-letter">B</span>知识库</h2>
+        <a class="nav-item" href="#"><i data-lucide="file-text" style="width:16px;height:16px"></i><span>项目文档</span></a>
+      </div>
+      <div class="legend-group">
+        <h2><span class="sheet-letter">C</span>索引运维</h2>
+        <a class="nav-item" href="#"><i data-lucide="gauge" style="width:16px;height:16px"></i><span>概览</span></a>
+        <a class="nav-item" href="#"><i data-lucide="boxes" style="width:16px;height:16px"></i><span>索引任务</span></a>
+      </div>
+      <div class="legend-group">
+        <h2><span class="sheet-letter">D</span>管理</h2>
+        <a class="nav-item" href="#"><i data-lucide="database" style="width:16px;height:16px"></i><span>仓库</span></a>
+        <a class="nav-item" href="#"><i data-lucide="cloud" style="width:16px;height:16px"></i><span>GitLab 来源</span></a>
+        <a class="nav-item" href="#"><i data-lucide="cloud" style="width:16px;height:16px"></i><span>GitHub 来源</span></a>
+        <a class="nav-item" href="#"><i data-lucide="cpu" style="width:16px;height:16px"></i><span>Embedding 模型</span></a>
+        <a class="nav-item" href="#"><i data-lucide="users" style="width:16px;height:16px"></i><span>成员</span></a>
+        <a class="nav-item" href="#"><i data-lucide="key-round" style="width:16px;height:16px"></i><span>API Token</span></a>
+      </div>
+      <div class="account-block">
+        <span class="avatar">陈</span>
+        <span class="account-copy"><strong>陈砚</strong><span>管理员</span></span>
+        <button class="icon-button" type="button" aria-label="退出登录"><i data-lucide="log-out" style="width:16px;height:16px"></i></button>
+      </div>
+    </aside>
+
+    <main class="workbench">
+      <div class="workbench-inner">
+        <section class="sheet-head">
+          <p class="eyebrow">CODE ATLAS · 私有代码知识库</p>
+          <h1>代码搜索</h1>
+          <p class="sheet-info">图幅 <b>K-07</b><span class="sep">|</span><b>12</b> 个仓库<span class="sep">|</span><b>48,392</b> chunks<span class="sep">|</span>索引 <b>v2f81c9</b> · 同步于 12 分钟前</p>
+        </section>
+
+        <section class="survey-input" aria-label="检索">
+          <form class="search-form" onsubmit="return false">
+            <i class="leading-icon" data-lucide="search" style="width:19px;height:19px"></i>
+            <input type="search" value="ERR_TOKEN_EXPIRED 会话过期处理" aria-label="搜索代码">
+            <button class="search-submit" type="submit"><i data-lucide="locate-fixed" style="width:16px;height:16px"></i>检索</button>
+          </form>
+          <div class="filter-row">
+            <label>仓库
+              <select><option>全部仓库</option><option>codeatlas-backend</option></select>
+            </label>
+            <label>语言
+              <select><option>全部语言</option><option>Python</option></select>
+            </label>
+            <label>路径前缀
+              <select><option>全部路径</option><option>src/auth/</option></select>
+            </label>
+            <button class="filter-clear" type="button">清除条件</button>
+          </div>
+        </section>
+
+        <div class="results-grid">
+          <section aria-label="检索结果">
+            <p class="result-count">命中 <strong>7</strong> 条证据 · 按融合相关度排序</p>
+
+            <article class="result">
+              <header class="result-head">
+                <span class="pin" aria-hidden="true"></span>
+                <div class="result-title">
+                  <h3><span class="dirname">backend/src/auth/</span>session.py</h3>
+                  <p class="result-meta">
+                    <span class="chip coord">K-07</span>
+                    <span class="chip">codeatlas-backend@a3f81c2</span>
+                    <span class="chip lang">Python</span>
+                    <span>L120–168</span>
+                    <span class="score">rrf 0.0184</span>
+                  </p>
+                </div>
+                <div class="result-actions">
+                  <button class="icon-button" type="button" aria-label="复制路径"><i data-lucide="copy" style="width:16px;height:16px"></i></button>
+                  <button class="icon-button" type="button" aria-label="在浏览中打开"><i data-lucide="external-link" style="width:16px;height:16px"></i></button>
+                </div>
+              </header>
+              <pre class="snippet"><code><span class="ln">120</span><span>def _expire_session(session: UserSession) -&gt; None:</span>
+<span class="ln">121</span><span>    if session.expires_at &lt;= now():</span>
+<span class="ln">122</span><span>        raise AuthError(</span>
+<span class="ln">123</span><span>            <mark>ERR_TOKEN_EXPIRED</mark>,</span>
+<span class="ln">124</span><span>            detail="会话已过期，请重新登录后重试",</span>
+<span class="ln">125</span><span>        )</span>
+<span class="ln">126</span><span>    redis.delete(f"session:{session.token_hash}")</span>
+<span class="ln">127</span><span>    audit.log("session.expired", user_id=session.user_id)</span></code></pre>
+              <footer class="result-foot">
+                <button class="text-button" type="button"><i data-lucide="file-code-2" style="width:14px;height:14px"></i>打开文件</button>
+                <button class="text-button" type="button"><i data-lucide="git-commit-horizontal" style="width:14px;height:14px"></i>查看所在提交</button>
+                <span class="spacer"></span>
+                <span class="score">提交于 2026-08-21</span>
+              </footer>
+            </article>
+
+            <article class="result">
+              <header class="result-head">
+                <span class="pin" aria-hidden="true"></span>
+                <div class="result-title">
+                  <h3><span class="dirname">support-copilot/src/main/java/com/atlas/token/</span>TokenService.java</h3>
+                  <p class="result-meta">
+                    <span class="chip coord">K-07</span>
+                    <span class="chip">enterprise-support-copilot@7d02e4b</span>
+                    <span class="chip lang">Java</span>
+                    <span>L88–102</span>
+                    <span class="score">rrf 0.0157</span>
+                  </p>
+                </div>
+                <div class="result-actions">
+                  <button class="icon-button" type="button" aria-label="复制路径"><i data-lucide="copy" style="width:16px;height:16px"></i></button>
+                  <button class="icon-button" type="button" aria-label="在浏览中打开"><i data-lucide="external-link" style="width:16px;height:16px"></i></button>
+                </div>
+              </header>
+              <footer class="result-foot">
+                <span>刷新令牌时校验 <mark style="all:unset;color:var(--vermilion-deep);font-family:var(--mono);font-size:12px;border-bottom:1px solid var(--vermilion)">ERR_TOKEN_EXPIRED</mark> 并触发静默续期</span>
+                <span class="spacer"></span>
+                <span class="score">提交于 2026-08-19</span>
+              </footer>
+            </article>
+
+            <article class="result pin-pine">
+              <header class="result-head">
+                <span class="pin" aria-hidden="true"></span>
+                <div class="result-title">
+                  <h3><span class="dirname">docs/auth/</span>session-lifecycle.md</h3>
+                  <p class="result-meta">
+                    <span class="chip coord">K-07</span>
+                    <span class="chip">codeatlas-backend@f5c91aa</span>
+                    <span class="chip lang">Markdown</span>
+                    <span>L14–27</span>
+                    <span class="score">rrf 0.0121</span>
+                  </p>
+                </div>
+                <div class="result-actions">
+                  <button class="icon-button" type="button" aria-label="复制路径"><i data-lucide="copy" style="width:16px;height:16px"></i></button>
+                  <button class="icon-button" type="button" aria-label="在浏览中打开"><i data-lucide="external-link" style="width:16px;height:16px"></i></button>
+                </div>
+              </header>
+              <footer class="result-foot">
+                <span>会话与令牌的过期策略：访问令牌 15 分钟，刷新令牌 30 天，见过期错误码约定</span>
+                <span class="spacer"></span>
+                <span class="score">提交于 2026-08-12</span>
+              </footer>
+            </article>
+          </section>
+
+          <aside class="rail" aria-label="检索画像">
+            <div class="rail-panel">
+              <h2>检索画像</h2>
+              <div class="spec-row"><span>向量召回</span><span class="val">Top 50</span></div>
+              <div class="spec-row"><span>FULLTEXT 召回</span><span class="val">Top 50</span></div>
+              <div class="spec-row"><span>融合策略</span><span class="val">RRF k=60</span></div>
+              <div class="spec-row"><span>重叠抑制</span><span class="val">开启</span></div>
+              <div class="spec-row"><span>语言过滤</span><span class="val">全部</span></div>
+            </div>
+            <div class="rail-panel">
+              <h2>命中分布</h2>
+              <div class="dist-row">
+                <span class="dist-label"><span>codeatlas-backend</span><span>4</span></span>
+                <div class="dist-bar"><div class="dist-fill" style="width:80%"></div></div>
+              </div>
+              <div class="dist-row">
+                <span class="dist-label"><span>support-copilot</span><span>2</span></span>
+                <div class="dist-bar"><div class="dist-fill" style="width:40%"></div></div>
+              </div>
+              <div class="dist-row">
+                <span class="dist-label"><span>billing-core</span><span>1</span></span>
+                <div class="dist-bar"><div class="dist-fill" style="width:20%"></div></div>
+              </div>
+            </div>
+            <div class="rail-panel">
+              <h2>证据说明</h2>
+              <p class="rail-hint">每条结果都标注来源仓库、提交与行号范围，可回到<span class="bench-inline"> △ </span>基准提交逐条核对，再决定是否采信。</p>
+            </div>
+          </aside>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+<script>lucide.createIcons();</script>
+</body>
+</html>

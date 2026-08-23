@@ -1,0 +1,64 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "codeatlas"
+version = "0.1.0"
+description = "Private code knowledge base with hybrid retrieval and MCP access"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "alembic>=1.16,<2",
+  "argon2-cffi>=25,<26",
+  "chromadb>=1.5,<2",
+  "cryptography>=45,<47",
+  "fastapi>=0.116,<1",
+  "GitPython>=3.1,<4",
+  "httpx>=0.28,<1",
+  "mcp>=1.25,<2",
+  "pymysql>=1.1,<2",
+  "pysqlite3-binary>=0.5.4,<1; sys_platform == 'linux'",
+  "python-dotenv>=1.1,<2",
+  "python-multipart>=0.0.20,<1",
+  "sqlmodel>=0.0.24,<1",
+  "tree-sitter>=0.25,<0.26",
+  "tree-sitter-java>=0.23,<1",
+  "tree-sitter-javascript>=0.25,<1",
+  "tree-sitter-python>=0.25,<1",
+  "tree-sitter-typescript>=0.23,<1",
+  "uvicorn[standard]>=0.35,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.17,<2",
+  "pytest>=8.4,<10",
+  "pytest-cov>=6,<8",
+  "ruff>=0.12,<1",
+]
+
+[project.scripts]
+codeatlas = "codeatlas.cli:main"
+codeatlas-mcp = "codeatlas.mcp_server:stdio_main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["codeatlas"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra --strict-markers --basetemp=.pytest-tmp"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".pytest-tmp", ".migration-test"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+plugins = ["pydantic.mypy"]
+ignore_missing_imports = true
+warn_unused_ignores = true
