@@ -2,7 +2,7 @@ import sitemap from '@astrojs/sitemap'
 import { defineConfig } from 'astro/config'
 
 export default defineConfig({
-  site: process.env.SITE_URL || 'http://codeatlas.example.com:8080',
+  site: process.env.SITE_URL || 'https://codeatlas.example.com',
   integrations: [sitemap()],
   markdown: {
     shikiConfig: { theme: 'github-dark' },

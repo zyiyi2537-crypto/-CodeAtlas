@@ -85,8 +85,9 @@ Backups are never automatically deleted.
 administrator public IP. Update it and run `nginx -t && systemctl reload nginx`
 when the IP changes. Before ICP filing, Nginx also listens on port `8080` because
 mainland providers may intercept public HTTP traffic on ports 80 and 443. The
-temporary URL is `http://codeatlas.example.com:8080/` and its security-group rule must
-remain restricted to the administrator IP. After ICP filing, remove the 8080
-listener, bind the domain on ports 80 and 443, add a certificate, set
+temporary URL should use an administrator-controlled hostname or IP and its
+security-group rule must remain restricted to the administrator IP. Do not
+commit the real server address to the repository. After ICP filing, remove the
+8080 listener, bind the domain on ports 80 and 443, add a certificate, set
 `CODEATLAS_PUBLIC_ORIGIN` to the HTTPS origin and enable
 `CODEATLAS_COOKIE_SECURE=true`.

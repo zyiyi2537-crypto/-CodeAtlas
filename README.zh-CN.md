@@ -94,7 +94,7 @@ Streamable HTTP MCP 暴露于 `/mcp`，并要求提供 API Token：
   "mcpServers": {
     "codeatlas": {
       "type": "streamable-http",
-      "url": "http://codeatlas.example.com:8080/mcp",
+      "url": "https://codeatlas.example.com/mcp",
       "headers": {
         "Authorization": "Bearer cat_REPLACE_WITH_TOKEN"
       }
