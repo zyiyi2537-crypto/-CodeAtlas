@@ -1,5 +1,7 @@
 # CodeAtlas
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 CodeAtlas is a private code knowledge base and MCP retrieval service. It indexes
 versioned Git repositories, combines vector and MySQL FULLTEXT retrieval (ngram parser),
 and returns code evidence with repository, commit, symbol, path, and line metadata.
