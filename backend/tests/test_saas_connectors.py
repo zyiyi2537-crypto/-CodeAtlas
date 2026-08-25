@@ -50,6 +50,46 @@ def test_external_endpoint_rejects_ip_transition_addresses(
         resolve_public_endpoint("https://connector.example/wiki")
 
 
+def test_allowlisted_confluence_accepts_only_ordinary_private_address(monkeypatch) -> None:
+    monkeypatch.setenv("CODEATLAS_ALLOWED_EXTERNAL_HOSTS", "confluence.internal")
+    monkeypatch.setattr(
+        "codeatlas.connectors.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [(0, 0, 0, "", ("10.20.30.40", 443))],
+    )
+
+    endpoint = resolve_public_endpoint(
+        "https://confluence.internal/wiki", allow_private_host=True
+    )
+
+    assert endpoint.addresses == ("10.20.30.40",)
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "127.0.0.1",
+        "169.254.169.254",
+        "::ffff:127.0.0.1",
+        "64:ff9b::7f00:1",
+        "2002:7f00:1::",
+        "2001:0000:4136:e378:8000:63bf:3fff:fdd2",
+    ],
+)
+def test_allowlisted_confluence_rejects_unsafe_private_or_transition_address(
+    monkeypatch, address: str
+) -> None:
+    monkeypatch.setenv("CODEATLAS_ALLOWED_EXTERNAL_HOSTS", "confluence.internal")
+    monkeypatch.setattr(
+        "codeatlas.connectors.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [(0, 0, 0, "", (address, 443))],
+    )
+
+    with pytest.raises(ValueError, match="non-public"):
+        resolve_public_endpoint(
+            "https://confluence.internal/wiki", allow_private_host=True
+        )
+
+
 def test_external_endpoint_rejects_port_zero(monkeypatch) -> None:
     monkeypatch.setattr(
         "codeatlas.connectors.socket.getaddrinfo",

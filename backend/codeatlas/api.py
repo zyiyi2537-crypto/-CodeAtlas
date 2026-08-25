@@ -371,7 +371,9 @@ def validate_external_source_config(provider: str, config: dict[str, str]) -> di
     if provider == "confluence" and normalized.get("deployment") not in {"cloud", "data_center"}:
         raise ValueError("Confluence deployment must be cloud or data_center")
     if provider == "confluence":
-        normalized["base_url"] = validate_public_https_base_url(normalized["base_url"])
+        normalized["base_url"] = validate_public_https_base_url(
+            normalized["base_url"], allow_private_host=True
+        )
     if provider == "aws_s3" and normalized.get("endpoint_url"):
         normalized["endpoint_url"] = validate_public_https_base_url(
             normalized["endpoint_url"]

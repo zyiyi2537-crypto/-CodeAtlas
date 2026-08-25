@@ -101,6 +101,25 @@ def test_s3_uses_default_credential_chain_when_static_keys_are_absent(monkeypatc
     assert "aws_secret_access_key" not in captured
 
 
+def test_s3_custom_endpoint_rejects_allowlisted_private_host(monkeypatch) -> None:
+    monkeypatch.setenv("CODEATLAS_ALLOWED_EXTERNAL_HOSTS", "storage.internal")
+    monkeypatch.setattr(
+        "codeatlas.connectors.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [(0, 0, 0, "", ("10.20.30.40", 443))],
+    )
+
+    with pytest.raises(ValueError, match="non-public"):
+        S3Connector(
+            {
+                "bucket": "company-docs",
+                "region": "ap-southeast-1",
+                "endpoint_url": "https://storage.internal",
+            },
+            {},
+            client=FakeS3Client(),
+        )
+
+
 def test_custom_s3_session_pins_the_validated_address(monkeypatch) -> None:
     connected: list[tuple[str, int]] = []
 

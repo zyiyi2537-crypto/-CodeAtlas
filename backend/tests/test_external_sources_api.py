@@ -136,7 +136,19 @@ def test_object_storage_source_validates_required_config(
 def test_admin_can_create_notion_and_confluence_sources(
     client: TestClient, admin, monkeypatch
 ) -> None:
-    monkeypatch.setenv("CODEATLAS_ALLOWED_EXTERNAL_HOSTS", "company.atlassian.net")
+    import socket
+
+    original_getaddrinfo = socket.getaddrinfo
+
+    def resolve_public_confluence(host, *args, **kwargs):
+        if host == "company.atlassian.net":
+            return [(0, 0, 0, "", ("8.8.8.8", 443))]
+        return original_getaddrinfo(host, *args, **kwargs)
+
+    monkeypatch.setattr(
+        "codeatlas.connectors.socket.getaddrinfo",
+        resolve_public_confluence,
+    )
     csrf = login_admin(client)
     collection_id = _collection(client, csrf)
     headers = {"X-CSRF-Token": csrf}
@@ -205,7 +217,10 @@ def test_admin_can_delete_external_source(
     assert deleted == [source_id]
 
 
-def test_external_source_rejects_private_confluence_url(client: TestClient, admin) -> None:
+def test_external_source_rejects_private_confluence_url(
+    client: TestClient, admin, monkeypatch
+) -> None:
+    monkeypatch.setenv("CODEATLAS_ALLOWED_EXTERNAL_HOSTS", "localhost")
     csrf = login_admin(client)
     collection_id = _collection(client, csrf)
     response = client.post(
@@ -226,7 +241,49 @@ def test_external_source_rejects_private_confluence_url(client: TestClient, admi
     assert response.status_code == 422
 
 
-def test_external_source_rejects_private_s3_endpoint(client: TestClient, admin) -> None:
+def test_external_source_allows_explicit_private_confluence_host(
+    client: TestClient, admin, monkeypatch
+) -> None:
+    import socket
+
+    original_getaddrinfo = socket.getaddrinfo
+
+    def resolve_private_confluence(host, *args, **kwargs):
+        if host == "confluence.internal":
+            return [(0, 0, 0, "", ("10.20.30.40", 443))]
+        return original_getaddrinfo(host, *args, **kwargs)
+
+    monkeypatch.setenv("CODEATLAS_ALLOWED_EXTERNAL_HOSTS", "confluence.internal")
+    monkeypatch.setattr(
+        "codeatlas.connectors.socket.getaddrinfo",
+        resolve_private_confluence,
+    )
+    csrf = login_admin(client)
+    collection_id = _collection(client, csrf)
+
+    response = client.post(
+        "/api/v1/external-sources",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "name": "Allowlisted Confluence",
+            "provider": "confluence",
+            "collection_id": collection_id,
+            "credential_ref": "confluence-internal",
+            "config": {
+                "base_url": "https://confluence.internal/wiki",
+                "space_key": "ENG",
+                "deployment": "data_center",
+            },
+        },
+    )
+
+    assert response.status_code == 201, response.text
+
+
+def test_external_source_rejects_private_s3_endpoint(
+    client: TestClient, admin, monkeypatch
+) -> None:
+    monkeypatch.setenv("CODEATLAS_ALLOWED_EXTERNAL_HOSTS", "127.0.0.1")
     csrf = login_admin(client)
     collection_id = _collection(client, csrf)
     response = client.post(

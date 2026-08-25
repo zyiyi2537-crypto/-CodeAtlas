@@ -53,6 +53,12 @@ _IPV6_TRANSITION_NETWORKS = (
     IPv6Network("64:ff9b::/96"),
     IPv6Network("64:ff9b:1::/48"),
 )
+_ALLOWLISTED_PRIVATE_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("fc00::/7"),
+)
 
 
 def _is_public_destination(address: str) -> bool:
@@ -67,7 +73,24 @@ def _is_public_destination(address: str) -> bool:
     return True
 
 
-def resolve_public_endpoint(value: str, *, skip_network: bool = False) -> ResolvedEndpoint:
+def _is_allowlisted_private_destination(address: str) -> bool:
+    value = ipaddress.ip_address(address.split("%", 1)[0])
+    if isinstance(value, IPv6Address) and (
+        value.ipv4_mapped is not None
+        or value.sixtofour is not None
+        or value.teredo is not None
+        or any(value in network for network in _IPV6_TRANSITION_NETWORKS)
+    ):
+        return False
+    return any(value in network for network in _ALLOWLISTED_PRIVATE_NETWORKS)
+
+
+def resolve_public_endpoint(
+    value: str,
+    *,
+    skip_network: bool = False,
+    allow_private_host: bool = False,
+) -> ResolvedEndpoint:
     from urllib.parse import urlsplit
 
     parsed = urlsplit(value.strip().rstrip("/"))
@@ -97,10 +120,13 @@ def resolve_public_endpoint(value: str, *, skip_network: bool = False) -> Resolv
         for item in os.getenv("CODEATLAS_ALLOWED_EXTERNAL_HOSTS", "").split(",")
         if item.strip()
     }
-    if hostname not in allowed_private_hosts:
-        for address in addresses:
-            if not _is_public_destination(address):
-                raise ValueError("External base URL resolves to a non-public address")
+    private_host_allowed = allow_private_host and hostname in allowed_private_hosts
+    for address in addresses:
+        if _is_public_destination(address):
+            continue
+        if private_host_allowed and _is_allowlisted_private_destination(address):
+            continue
+        raise ValueError("External base URL resolves to a non-public address")
     return ResolvedEndpoint(parsed.geturl().rstrip("/"), hostname, port, addresses)
 
 
@@ -596,8 +622,17 @@ class NotionConnector:
         self.client.close()
 
 
-def validate_public_https_base_url(value: str, *, skip_network: bool = False) -> str:
-    return resolve_public_endpoint(value, skip_network=skip_network).url
+def validate_public_https_base_url(
+    value: str,
+    *,
+    skip_network: bool = False,
+    allow_private_host: bool = False,
+) -> str:
+    return resolve_public_endpoint(
+        value,
+        skip_network=skip_network,
+        allow_private_host=allow_private_host,
+    ).url
 
 
 class ConfluenceConnector:
@@ -610,7 +645,9 @@ class ConfluenceConnector:
         skip_network_validation: bool = False,
     ) -> None:
         endpoint = resolve_public_endpoint(
-            str(config.get("base_url", "")), skip_network=skip_network_validation
+            str(config.get("base_url", "")),
+            skip_network=skip_network_validation,
+            allow_private_host=True,
         )
         self.base_url = endpoint.url
         self.space_key = str(config.get("space_key", "")).strip()
