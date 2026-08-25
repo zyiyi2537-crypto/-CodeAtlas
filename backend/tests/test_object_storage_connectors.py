@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from io import BytesIO
 
+import pytest
+from botocore.awsrequest import AWSRequest
 from sqlmodel import Session, select
 
 from codeatlas.connectors import (
@@ -10,6 +12,7 @@ from codeatlas.connectors import (
     S3Connector,
     TencentCosConnector,
     _append_item,
+    build_pinned_s3_session,
 )
 from codeatlas.external_sync import ExternalSourceSyncService
 from codeatlas.models import (
@@ -96,6 +99,45 @@ def test_s3_uses_default_credential_chain_when_static_keys_are_absent(monkeypatc
     assert captured["service"] == "s3"
     assert "aws_access_key_id" not in captured
     assert "aws_secret_access_key" not in captured
+
+
+def test_custom_s3_session_pins_the_validated_address(monkeypatch) -> None:
+    connected: list[tuple[str, int]] = []
+
+    class FakeSocket:
+        def setsockopt(self, *_args):
+            return None
+
+    monkeypatch.setattr(
+        "urllib3.util.connection.create_connection",
+        lambda address, *_args, **_kwargs: (connected.append(address) or FakeSocket()),
+    )
+    session = build_pinned_s3_session("storage.example", ("8.8.8.8",))
+    pool_class = session._manager.pool_classes_by_scheme["https"]
+    pool = pool_class("storage.example", 443)
+    connection = pool._new_conn()
+
+    assert connection.host == "storage.example"
+    connection._new_conn()
+    assert connected == [("8.8.8.8", 443)]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://storage.example:9443/base",
+        "https://evil.example:9443/base",
+        "https://storage.example:443/base",
+    ],
+)
+def test_custom_s3_session_rejects_redirected_destination(url: str) -> None:
+    session = build_pinned_s3_session(
+        "storage.example", ("8.8.8.8",), port=9443
+    )
+    request = AWSRequest(method="GET", url=url).prepare()
+
+    with pytest.raises(ValueError, match="validated endpoint"):
+        session.send(request)
 
 
 class FakeCosBody:
@@ -329,6 +371,31 @@ def test_external_sync_records_connector_initialization_failure(
         assert source is not None and source.sync_status == "failed"
         assert "secret-value" not in source.last_error
         assert "[REDACTED]" in source.last_error
+
+
+def test_embedding_switch_gate_blocks_new_external_sync(
+    application, admin
+) -> None:
+    source_id = _source(application, admin, "Embedding switch gate")
+    service = ExternalSourceSyncService(
+        application.state.settings,
+        application.state.engine,
+        application.state.knowledge_search,
+    )
+    service.begin_embedding_switch()
+    try:
+        with pytest.raises(RuntimeError, match="Embedding profile switch"):
+            service.sync_source(source_id)
+        try:
+            service.submit(source_id)
+        except RuntimeError as exc:
+            assert "Embedding profile switch" in str(exc)
+        else:
+            raise AssertionError("external sync started during embedding switch")
+    finally:
+        service.end_embedding_switch()
+
+    assert service.embedding_switch_in_progress is False
 
 
 def test_remote_delete_keeps_mysql_truth_when_chroma_delete_fails(

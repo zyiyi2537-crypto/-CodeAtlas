@@ -1,8 +1,106 @@
 from __future__ import annotations
 
 import httpx
+import pytest
 
-from codeatlas.connectors import ConfluenceConnector, NotionConnector
+from codeatlas.connectors import (
+    ConfluenceConnector,
+    NotionConnector,
+    build_pinned_httpx_transport,
+    resolve_public_endpoint,
+)
+
+
+def test_external_endpoint_resolution_rejects_dns_rebinding(monkeypatch) -> None:
+    answers = iter([
+        [(0, 0, 0, "", ("8.8.8.8", 443))],
+        [(0, 0, 0, "", ("127.0.0.1", 443))],
+    ])
+    monkeypatch.setattr(
+        "codeatlas.connectors.socket.getaddrinfo",
+        lambda *_args, **_kwargs: next(answers),
+    )
+
+    pinned = resolve_public_endpoint("https://connector.example/wiki")
+    assert pinned.addresses == ("8.8.8.8",)
+    assert pinned.hostname == "connector.example"
+
+    with pytest.raises(ValueError, match="non-public"):
+        resolve_public_endpoint("https://connector.example/wiki")
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "64:ff9b::7f00:1",
+        "64:ff9b:1::7f00:1",
+        "2002:7f00:1::",
+        "2001:0000:4136:e378:8000:63bf:3fff:fdd2",
+    ],
+)
+def test_external_endpoint_rejects_ip_transition_addresses(
+    monkeypatch, address: str
+) -> None:
+    monkeypatch.setattr(
+        "codeatlas.connectors.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [(0, 0, 0, "", (address, 443))],
+    )
+
+    with pytest.raises(ValueError, match="non-public"):
+        resolve_public_endpoint("https://connector.example/wiki")
+
+
+def test_external_endpoint_rejects_port_zero(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "codeatlas.connectors.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [(0, 0, 0, "", ("8.8.8.8", 0))],
+    )
+
+    with pytest.raises(ValueError, match="invalid port"):
+        resolve_public_endpoint("https://connector.example:0/wiki")
+
+
+def test_httpx_transport_connects_to_the_validated_address(monkeypatch) -> None:
+    endpoint = type(
+        "Endpoint",
+        (),
+        {
+            "hostname": "connector.example",
+            "addresses": ("8.8.8.8",),
+        },
+    )()
+    connected: list[tuple[str, int]] = []
+
+    class FakeSocket:
+        def settimeout(self, _timeout):
+            return None
+
+        def setsockopt(self, *_args):
+            return None
+
+        def getsockname(self):
+            return ("127.0.0.1", 12345)
+
+        def getpeername(self):
+            return ("8.8.8.8", 443)
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "httpcore._backends.sync.socket.create_connection",
+        lambda address, *_args, **_kwargs: (connected.append(address) or FakeSocket()),
+    )
+    transport = build_pinned_httpx_transport(endpoint)
+    try:
+        stream = transport._pool._network_backend.connect_tcp(
+            "connector.example", 443, timeout=1
+        )
+        stream.close()
+    finally:
+        transport.close()
+
+    assert connected == [("8.8.8.8", 443)]
 
 
 def test_notion_connector_paginates_pages_and_renders_structured_markdown() -> None:

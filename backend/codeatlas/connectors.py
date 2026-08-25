@@ -5,7 +5,9 @@ import json
 import mimetypes
 import os
 import socket
+import threading
 from dataclasses import dataclass
+from ipaddress import IPv6Address, IPv6Network
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import quote
@@ -37,6 +39,167 @@ class ExternalItem:
     modified_at: str = ""
     url: str = ""
     size: int = 0
+
+
+@dataclass(frozen=True)
+class ResolvedEndpoint:
+    url: str
+    hostname: str
+    port: int
+    addresses: tuple[str, ...]
+
+
+_IPV6_TRANSITION_NETWORKS = (
+    IPv6Network("64:ff9b::/96"),
+    IPv6Network("64:ff9b:1::/48"),
+)
+
+
+def _is_public_destination(address: str) -> bool:
+    value = ipaddress.ip_address(address.split("%", 1)[0])
+    if not value.is_global:
+        return False
+    if isinstance(value, IPv6Address):
+        if value.ipv4_mapped is not None or value.sixtofour is not None or value.teredo is not None:
+            return False
+        if any(value in network for network in _IPV6_TRANSITION_NETWORKS):
+            return False
+    return True
+
+
+def resolve_public_endpoint(value: str, *, skip_network: bool = False) -> ResolvedEndpoint:
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit(value.strip().rstrip("/"))
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError("External base URL must be public HTTPS without credentials")
+    if parsed.query or parsed.fragment:
+        raise ValueError("External base URL must not contain query parameters or fragments")
+    try:
+        parsed_port = parsed.port
+        port = 443 if parsed_port is None else parsed_port
+    except ValueError as exc:
+        raise ValueError("External base URL has an invalid port") from exc
+    if not 1 <= port <= 65535:
+        raise ValueError("External base URL has an invalid port")
+    hostname = parsed.hostname.lower().rstrip(".")
+    if skip_network:
+        return ResolvedEndpoint(parsed.geturl().rstrip("/"), hostname, port, ())
+    try:
+        answers = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise ValueError(f"External host DNS resolution failed: {exc}") from exc
+    addresses = tuple(dict.fromkeys(str(answer[4][0]) for answer in answers))
+    if not addresses:
+        raise ValueError("External host DNS resolution returned no addresses")
+    allowed_private_hosts = {
+        item.strip().lower().rstrip(".")
+        for item in os.getenv("CODEATLAS_ALLOWED_EXTERNAL_HOSTS", "").split(",")
+        if item.strip()
+    }
+    if hostname not in allowed_private_hosts:
+        for address in addresses:
+            if not _is_public_destination(address):
+                raise ValueError("External base URL resolves to a non-public address")
+    return ResolvedEndpoint(parsed.geturl().rstrip("/"), hostname, port, addresses)
+
+
+def build_pinned_httpx_transport(endpoint: ResolvedEndpoint) -> httpx.HTTPTransport:
+    from httpcore._backends.sync import SyncBackend
+
+    class PinnedNetworkBackend(SyncBackend):
+        def __init__(self) -> None:
+            self._backend = SyncBackend()
+            self._lock = threading.Lock()
+            self._next_address = 0
+
+        def connect_tcp(self, host, port, **kwargs):
+            normalized = host.decode() if isinstance(host, bytes) else str(host)
+            if normalized.lower().rstrip(".") != endpoint.hostname:
+                raise OSError("Outbound connection host does not match the validated endpoint")
+            with self._lock:
+                start = self._next_address
+                self._next_address = (self._next_address + 1) % len(endpoint.addresses)
+            last_error: Exception | None = None
+            for offset in range(len(endpoint.addresses)):
+                address = endpoint.addresses[(start + offset) % len(endpoint.addresses)]
+                try:
+                    return self._backend.connect_tcp(address, port, **kwargs)
+                except Exception as exc:
+                    last_error = exc
+            assert last_error is not None
+            raise last_error
+
+        def connect_unix_socket(self, path, **kwargs):
+            return self._backend.connect_unix_socket(path, **kwargs)
+
+        def sleep(self, seconds):
+            return self._backend.sleep(seconds)
+
+    if not endpoint.addresses:
+        raise ValueError("Pinned HTTP transport requires validated endpoint addresses")
+    transport = httpx.HTTPTransport(trust_env=False)
+    transport._pool._network_backend = PinnedNetworkBackend()
+    return transport
+
+
+def build_pinned_s3_session(
+    hostname: str, addresses: tuple[str, ...], *, port: int = 443
+):
+    from botocore.awsrequest import AWSHTTPSConnection, AWSHTTPSConnectionPool
+    from botocore.httpsession import URLLib3Session
+    from urllib3.util import connection as urllib3_connection
+
+    if not addresses:
+        raise ValueError("Pinned S3 session requires validated endpoint addresses")
+    expected_hostname = hostname.lower().rstrip(".")
+
+    class PinnedURLLib3Session(URLLib3Session):
+        def send(self, request):
+            from urllib.parse import urlsplit
+
+            parsed = urlsplit(request.url)
+            try:
+                request_port = parsed.port
+            except ValueError as exc:
+                raise ValueError("S3 request escaped the validated endpoint") from exc
+            request_port = 443 if request_port is None else request_port
+            request_hostname = (parsed.hostname or "").lower().rstrip(".")
+            if (
+                parsed.scheme != "https"
+                or request_hostname != expected_hostname
+                or request_port != port
+                or parsed.username
+                or parsed.password
+            ):
+                raise ValueError("S3 request escaped the validated endpoint")
+            return super().send(request)
+
+    class PinnedAWSHTTPSConnection(AWSHTTPSConnection):
+        def _new_conn(self):
+            if self.host.lower().rstrip(".") != expected_hostname:
+                raise OSError("S3 connection host does not match the validated endpoint")
+            last_error: Exception | None = None
+            for address in addresses:
+                try:
+                    return urllib3_connection.create_connection(
+                        (address, self.port),
+                        self.timeout,
+                        source_address=self.source_address,
+                        socket_options=self.socket_options,
+                    )
+                except OSError as exc:
+                    last_error = exc
+            assert last_error is not None
+            raise last_error
+
+    class PinnedAWSHTTPSConnectionPool(AWSHTTPSConnectionPool):
+        ConnectionCls = PinnedAWSHTTPSConnection
+
+    session = PinnedURLLib3Session(proxies={})
+    session._pool_classes_by_scheme["https"] = PinnedAWSHTTPSConnectionPool
+    session._manager.pool_classes_by_scheme["https"] = PinnedAWSHTTPSConnectionPool
+    return session
 
 
 class Connector(Protocol):
@@ -106,8 +269,10 @@ class S3Connector:
         self.endpoint_url = str(config.get("endpoint_url", "")).strip() or None
         if not self.bucket or not self.region:
             raise ValueError("AWS S3 requires bucket and region")
+        resolved_endpoint = None
         if self.endpoint_url:
-            self.endpoint_url = validate_public_https_base_url(self.endpoint_url)
+            resolved_endpoint = resolve_public_endpoint(self.endpoint_url)
+            self.endpoint_url = resolved_endpoint.url
         if client is None:
             import boto3
 
@@ -122,6 +287,15 @@ class S3Connector:
                     aws_session_token=credential.get("session_token") or None,
                 )
             client = boto3.client("s3", **options)
+            if resolved_endpoint is not None:
+                pinned_session = build_pinned_s3_session(
+                    resolved_endpoint.hostname,
+                    resolved_endpoint.addresses,
+                    port=resolved_endpoint.port,
+                )
+                old_session = client._endpoint.http_session
+                client._endpoint.http_session = pinned_session
+                old_session.close()
         self.client = client
 
     def test_connection(self) -> None:
@@ -423,27 +597,7 @@ class NotionConnector:
 
 
 def validate_public_https_base_url(value: str, *, skip_network: bool = False) -> str:
-    from urllib.parse import urlsplit
-
-    parsed = urlsplit(value.strip().rstrip("/"))
-    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
-        raise ValueError("External base URL must be public HTTPS without credentials")
-    if parsed.query or parsed.fragment:
-        raise ValueError("External base URL must not contain query parameters or fragments")
-    allowed_private_hosts = {
-        item.strip().lower().rstrip(".")
-        for item in os.getenv("CODEATLAS_ALLOWED_EXTERNAL_HOSTS", "").split(",")
-        if item.strip()
-    }
-    if not skip_network and parsed.hostname.lower().rstrip(".") not in allowed_private_hosts:
-        try:
-            addresses = socket.getaddrinfo(parsed.hostname, 443, type=socket.SOCK_STREAM)
-        except OSError as exc:
-            raise ValueError(f"External host DNS resolution failed: {exc}") from exc
-        for result in addresses:
-            if not ipaddress.ip_address(result[4][0]).is_global:
-                raise ValueError("Confluence base_url resolves to a non-public address")
-    return parsed.geturl().rstrip("/")
+    return resolve_public_endpoint(value, skip_network=skip_network).url
 
 
 class ConfluenceConnector:
@@ -455,9 +609,10 @@ class ConfluenceConnector:
         transport: httpx.BaseTransport | None = None,
         skip_network_validation: bool = False,
     ) -> None:
-        self.base_url = validate_public_https_base_url(
+        endpoint = resolve_public_endpoint(
             str(config.get("base_url", "")), skip_network=skip_network_validation
         )
+        self.base_url = endpoint.url
         self.space_key = str(config.get("space_key", "")).strip()
         self.root_page_id = str(config.get("root_page_id", "")).strip()
         self.deployment = str(config.get("deployment", "cloud")).strip()
@@ -476,12 +631,17 @@ class ConfluenceConnector:
                 raise ValueError("Confluence Data Center requires personal_access_token")
             auth = None
             headers = {"Authorization": f"Bearer {personal_token}", "Accept": "application/json"}
+        client_transport = transport
+        if client_transport is None:
+            client_transport = build_pinned_httpx_transport(endpoint)
         self.client = httpx.Client(
             base_url=self.base_url,
             headers=headers,
             auth=auth,
             timeout=30,
-            transport=transport,
+            transport=client_transport,
+            follow_redirects=False,
+            trust_env=False,
         )
 
     def test_connection(self) -> None:

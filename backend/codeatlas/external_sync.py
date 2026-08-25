@@ -50,11 +50,23 @@ class ExternalSourceSyncService:
         )
         self.lock = threading.Lock()
         self.running_sources: set[str] = set()
+        self.embedding_switch_in_progress = False
 
-    def submit(self, source_id: str) -> None:
+    def _begin_source_operation(self, source_id: str) -> None:
         with self.lock:
+            if self.embedding_switch_in_progress:
+                raise RuntimeError("Embedding profile switch is in progress")
             if source_id in self.running_sources:
                 raise RuntimeError("External source synchronization is already running")
+            self.running_sources.add(source_id)
+
+    def _end_source_operation(self, source_id: str) -> None:
+        with self.lock:
+            self.running_sources.discard(source_id)
+
+    def submit(self, source_id: str) -> None:
+        self._begin_source_operation(source_id)
+        try:
             with Session(self.engine) as session:
                 source = session.get(ExternalSource, source_id)
                 if not source:
@@ -63,27 +75,33 @@ class ExternalSourceSyncService:
                 source.last_error = ""
                 session.add(source)
                 session.commit()
-            self.running_sources.add(source_id)
-        try:
             self.executor.submit(self._run_submitted, source_id)
         except Exception:
-            with self.lock:
-                self.running_sources.discard(source_id)
+            self._end_source_operation(source_id)
             raise
 
     def _run_submitted(self, source_id: str) -> None:
         try:
-            self.sync_source(source_id)
+            self._sync_source(source_id)
         except Exception:
             # Details are already redacted into ExternalSource.last_error. Keep
             # exception text and provider request data out of process logs.
             logger.error("External source synchronization failed: %s", source_id)
         finally:
-            with self.lock:
-                self.running_sources.discard(source_id)
+            self._end_source_operation(source_id)
 
     def shutdown(self) -> None:
         self.executor.shutdown(wait=False, cancel_futures=True)
+
+    def begin_embedding_switch(self) -> None:
+        with self.lock:
+            if self.embedding_switch_in_progress or self.running_sources:
+                raise RuntimeError("External source synchronization is running")
+            self.embedding_switch_in_progress = True
+
+    def end_embedding_switch(self) -> None:
+        with self.lock:
+            self.embedding_switch_in_progress = False
 
     def test_source(self, source_id: str) -> None:
         with Session(self.engine) as session:
@@ -104,6 +122,13 @@ class ExternalSourceSyncService:
                 close()
 
     def sync_source(self, source_id: str) -> SyncResult:
+        self._begin_source_operation(source_id)
+        try:
+            return self._sync_source(source_id)
+        finally:
+            self._end_source_operation(source_id)
+
+    def _sync_source(self, source_id: str) -> SyncResult:
         with Session(self.engine) as session:
             source = session.get(ExternalSource, source_id)
             if not source:
@@ -367,6 +392,8 @@ class ExternalSourceSyncService:
 
     def delete_source(self, source_id: str) -> None:
         with self.lock:
+            if self.embedding_switch_in_progress:
+                raise RuntimeError("Embedding profile switch is in progress")
             if source_id in self.running_sources:
                 raise RuntimeError("External source synchronization is running")
             self.running_sources.add(source_id)

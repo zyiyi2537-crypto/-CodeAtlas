@@ -42,7 +42,6 @@ from .github import (
 )
 from .gitlab import GitLabClient, GitLabClientError
 from .job_queue import ActiveIndexJobError, JobRequest
-from .knowledge_search import KnowledgeSearch
 from .llm_config import (
     LlmProviderError,
     decrypt_api_key,
@@ -976,56 +975,81 @@ def activate_embedding_profile(profile_id: str, request: Request):
             VectorStore(profile_settings, namespace=profile.id)
         except (ValueError, httpx.HTTPError) as exc:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
-        for item in session.exec(select(EmbeddingProfile).where(EmbeddingProfile.is_active)).all():
-            item.is_active = False
-            session.add(item)
-        profile.is_active = True
-        session.add(profile)
-        jobs: list[IndexJob] = []
-        repositories = session.exec(
-            select(Repository)
-            .where(col(Repository.status) != "archived")
-            .order_by(Repository.id)
-        ).all()
-        for repository in repositories:
-            try:
-                job = request.app.state.job_queue.add(
-                    session,
-                    JobRequest(
-                        repository_id=repository.id,
-                        created_by=identity.user.id,
-                        message=f"Queued after switching to embedding model {profile.name}",
-                    ),
-                )
-            except ActiveIndexJobError as exc:
-                raise HTTPException(
-                    status.HTTP_409_CONFLICT,
-                    "An indexing job started while switching embedding models",
-                ) from exc
-            if job is not None:
-                jobs.append(job)
-        audit(
-            session, "embedding_profile.activate", "embedding_profile", profile.id, identity.user.id
-        )
-        session.commit()
-        session.refresh(profile)
-        job_ids = [job.id for job in jobs]
-        response = {
-            "id": profile.id, "name": profile.name, "base_url": profile.base_url,
-            "model": profile.model, "dimension": profile.dimension,
-            "credential_ref": mask_credential_ref(profile.credential_ref),
-            "credential_configured": bool(resolve_embedding_api_key(profile.credential_ref)),
-            "credential_env": embedding_credential_name(profile.credential_ref),
-            "backend": profile.backend, "provider": profile.provider,
-            "is_active": profile.is_active,
-            "queued_jobs": len(job_ids),
-        }
-    request.app.state.job_queue.submit(job_ids)
-    request.app.state.knowledge_search = KnowledgeSearch(
-        request.app.state.engine, request.app.state.settings
-    )
-    response["knowledge_rebuild"] = request.app.state.knowledge_search.rebuild_all()
-    return response
+        try:
+            request.app.state.external_sync.begin_embedding_switch()
+        except RuntimeError as exc:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Wait for external source synchronization to finish before switching embeddings",
+            ) from exc
+        switch_committed = False
+        try:
+            for item in session.exec(
+                select(EmbeddingProfile).where(EmbeddingProfile.is_active)
+            ).all():
+                item.is_active = False
+                session.add(item)
+            profile.is_active = True
+            session.add(profile)
+            jobs: list[IndexJob] = []
+            repositories = session.exec(
+                select(Repository)
+                .where(col(Repository.status) != "archived")
+                .order_by(Repository.id)
+            ).all()
+            for repository in repositories:
+                try:
+                    job = request.app.state.job_queue.add(
+                        session,
+                        JobRequest(
+                            repository_id=repository.id,
+                            created_by=identity.user.id,
+                            message=f"Queued after switching to embedding model {profile.name}",
+                        ),
+                    )
+                except ActiveIndexJobError as exc:
+                    raise HTTPException(
+                        status.HTTP_409_CONFLICT,
+                        "An indexing job started while switching embedding models",
+                    ) from exc
+                if job is not None:
+                    jobs.append(job)
+            audit(
+                session,
+                "embedding_profile.activate",
+                "embedding_profile",
+                profile.id,
+                identity.user.id,
+            )
+            job_ids = [job.id for job in jobs]
+            response = {
+                "id": profile.id,
+                "name": profile.name,
+                "base_url": profile.base_url,
+                "model": profile.model,
+                "dimension": profile.dimension,
+                "credential_ref": mask_credential_ref(profile.credential_ref),
+                "credential_configured": bool(resolve_embedding_api_key(profile.credential_ref)),
+                "credential_env": embedding_credential_name(profile.credential_ref),
+                "backend": profile.backend,
+                "provider": profile.provider,
+                "is_active": profile.is_active,
+                "queued_jobs": len(job_ids),
+            }
+            session.commit()
+            switch_committed = True
+        finally:
+            if session.in_transaction():
+                session.rollback()
+            if not switch_committed:
+                request.app.state.external_sync.end_embedding_switch()
+    try:
+        request.app.state.knowledge_search.refresh_embedding_context()
+        response["knowledge_rebuild"] = request.app.state.knowledge_search.rebuild_all()
+        request.app.state.job_queue.submit(job_ids)
+        return response
+    finally:
+        request.app.state.external_sync.end_embedding_switch()
 
 
 @router.post("/gitlab-sources", status_code=201)

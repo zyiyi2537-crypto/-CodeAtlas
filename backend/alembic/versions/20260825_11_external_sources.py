@@ -70,13 +70,5 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index("ix_externalsourceitem_source_id", table_name="externalsourceitem")
-    op.drop_index("ix_externalsourceitem_document_id", table_name="externalsourceitem")
     op.drop_table("externalsourceitem")
-    op.drop_index("ix_externalsource_sync_status", table_name="externalsource")
-    op.drop_index("ix_externalsource_provider", table_name="externalsource")
-    op.drop_index("ix_externalsource_name", table_name="externalsource")
-    op.drop_index("ix_externalsource_enabled", table_name="externalsource")
-    op.drop_index("ix_externalsource_created_at", table_name="externalsource")
-    op.drop_index("ix_externalsource_collection_id", table_name="externalsource")
     op.drop_table("externalsource")

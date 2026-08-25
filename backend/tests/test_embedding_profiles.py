@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import login_admin
@@ -28,7 +29,7 @@ def test_admin_can_create_embedding_profile_without_exposing_key(
 
 
 def test_admin_can_activate_embedding_profile_and_queue_reindex(
-    client: TestClient, admin, monkeypatch
+    client: TestClient, application, admin, monkeypatch
 ) -> None:
     monkeypatch.setenv("CODEATLAS_CREDENTIAL_EMBEDDING_COMPANY", "server-only-key")
     csrf = login_admin(client)
@@ -44,6 +45,7 @@ def test_admin_can_activate_embedding_profile_and_queue_reindex(
         },
     )
     assert created.status_code == 201
+    original_search = application.state.knowledge_search
     monkeypatch.setattr(
         "codeatlas.api.EmbeddingClient.probe_dimension", lambda _self: 128
     )
@@ -54,6 +56,9 @@ def test_admin_can_activate_embedding_profile_and_queue_reindex(
     assert activated.status_code == 200
     assert activated.json()["is_active"] is True
     assert activated.json()["queued_jobs"] == 0
+    assert application.state.knowledge_search is original_search
+    assert application.state.external_sync.knowledge_search is application.state.knowledge_search
+    assert application.state.knowledge_search.vector_store.namespace == created.json()["id"]
 
 
 def test_embedding_activation_requires_server_credential(client: TestClient, admin) -> None:
@@ -75,6 +80,72 @@ def test_embedding_activation_requires_server_credential(client: TestClient, adm
     )
     assert activated.status_code == 422
     assert "CODEATLAS_CREDENTIAL_NOT_CONFIGURED" in activated.text
+
+
+def test_embedding_activation_rejects_running_external_sync(
+    client: TestClient, application, admin, monkeypatch
+) -> None:
+    monkeypatch.setenv("CODEATLAS_CREDENTIAL_EMBEDDING_COMPANY", "server-only-key")
+    csrf = login_admin(client)
+    created = client.post(
+        "/api/v1/embedding-profiles",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "name": "blocked-by-sync",
+            "base_url": "http://embedding.internal/v1",
+            "model": "bge-m3",
+            "dimension": 128,
+            "credential_ref": "embedding-company",
+        },
+    )
+    application.state.external_sync.running_sources.add("source-running")
+    monkeypatch.setattr(
+        "codeatlas.api.EmbeddingClient.probe_dimension", lambda _self: 128
+    )
+
+    response = client.post(
+        f"/api/v1/embedding-profiles/{created.json()['id']}/activate",
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    application.state.external_sync.running_sources.clear()
+    assert response.status_code == 409
+    assert "external" in response.text.lower()
+
+
+def test_embedding_context_refreshes_before_job_submission_failure(
+    client: TestClient, application, admin, monkeypatch
+) -> None:
+    monkeypatch.setenv("CODEATLAS_CREDENTIAL_EMBEDDING_COMPANY", "server-only-key")
+    csrf = login_admin(client)
+    created = client.post(
+        "/api/v1/embedding-profiles",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "name": "refresh-before-submit",
+            "base_url": "http://embedding.internal/v1",
+            "model": "bge-m3",
+            "dimension": 128,
+            "credential_ref": "embedding-company",
+        },
+    )
+    monkeypatch.setattr(
+        "codeatlas.api.EmbeddingClient.probe_dimension", lambda _self: 128
+    )
+    monkeypatch.setattr(
+        application.state.job_queue,
+        "submit",
+        lambda _job_ids: (_ for _ in ()).throw(RuntimeError("queue unavailable")),
+    )
+
+    with pytest.raises(RuntimeError, match="queue unavailable"):
+        client.post(
+            f"/api/v1/embedding-profiles/{created.json()['id']}/activate",
+            headers={"X-CSRF-Token": csrf},
+        )
+
+    assert application.state.knowledge_search.vector_store.namespace == created.json()["id"]
+    assert application.state.external_sync.embedding_switch_in_progress is False
 
 
 def test_milvus_backend_is_rejected_until_implemented(client: TestClient, admin) -> None:

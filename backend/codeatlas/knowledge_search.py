@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 
 from sqlmodel import Session, col, select
 
@@ -11,16 +12,40 @@ from .settings import Settings
 from .vector_store import KnowledgeVectorChunk, VectorStore
 
 
+@dataclass(frozen=True)
+class _EmbeddingContext:
+    settings: Settings
+    vector_store: VectorStore
+    embedder: EmbeddingClient
+
+
 class KnowledgeSearch:
     """Unified structural/semantic retrieval for documents and Wiki pages."""
 
     def __init__(self, engine, settings: Settings | None = None):
         self.engine = engine
         self.settings = settings
+        self.refresh_embedding_context()
+
+    def refresh_embedding_context(self) -> None:
         vector_settings, namespace = self._embedding_context()
-        self.vector_settings = vector_settings
-        self.vector_store = VectorStore(vector_settings, namespace=namespace)
-        self.embedder = EmbeddingClient(vector_settings)
+        self._context = _EmbeddingContext(
+            settings=vector_settings,
+            vector_store=VectorStore(vector_settings, namespace=namespace),
+            embedder=EmbeddingClient(vector_settings),
+        )
+
+    @property
+    def vector_settings(self) -> Settings:
+        return self._context.settings
+
+    @property
+    def vector_store(self) -> VectorStore:
+        return self._context.vector_store
+
+    @property
+    def embedder(self) -> EmbeddingClient:
+        return self._context.embedder
 
     def _embedding_context(self) -> tuple[Settings, str]:
         if self.settings is None:
@@ -79,8 +104,9 @@ class KnowledgeSearch:
             )
 
     def index_document(self, chunks: list[DocumentChunkRecord]) -> None:
+        context = self._context
         if chunks:
-            self.vector_store.delete_source("document", chunks[0].document_id)
+            context.vector_store.delete_source("document", chunks[0].document_id)
         vectors = []
         for chunk in chunks:
             metadata = json.loads(chunk.metadata_json or "{}")
@@ -106,9 +132,10 @@ class KnowledgeSearch:
                 )
             )
         if vectors:
-            self.vector_store.add_knowledge(vectors, self.embedder)
+            context.vector_store.add_knowledge(vectors, context.embedder)
 
     def index_wiki(self, page: WikiPage) -> None:
+        context = self._context
         blocks = self._wiki_blocks(page)
         chunks = split_structured_blocks(page.title, blocks)
         vectors = [
@@ -128,9 +155,9 @@ class KnowledgeSearch:
             )
             for index, chunk in enumerate(chunks, start=1)
         ]
-        self.vector_store.delete_source("wiki", page.id)
+        context.vector_store.delete_source("wiki", page.id)
         if vectors:
-            self.vector_store.add_knowledge(vectors, self.embedder)
+            context.vector_store.add_knowledge(vectors, context.embedder)
 
     def rebuild_all(self) -> dict[str, int]:
         document_chunks = self._document_rows()
@@ -160,6 +187,7 @@ class KnowledgeSearch:
         collection_ids: list[str] | tuple[str, ...] | None = None,
         limit: int = 10,
     ) -> list[dict]:
+        context = self._context
         terms = self._terms(query)
         wanted = source_types or ["document", "wiki"]
         lexical: dict[str, dict] = {}
@@ -201,8 +229,8 @@ class KnowledgeSearch:
                         "content": page.content,
                         "lexical_score": score,
                     }
-        vector = self.vector_store.search_knowledge(
-            self.embedder.embed([query])[0],
+        vector = context.vector_store.search_knowledge(
+            context.embedder.embed([query])[0],
             wanted,
             max(limit * 3, 20),
             list(collection_ids) if collection_ids else None,
