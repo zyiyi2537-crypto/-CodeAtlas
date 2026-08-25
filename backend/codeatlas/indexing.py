@@ -94,6 +94,7 @@ class IndexCoordinator:
                 repository_id = repository.id
                 git_url = repository.git_url
                 branch = repository.branch
+                requested_commit = job.commit
                 github_source = session.exec(
                     select(GitHubSource).where(GitHubSource.repository_id == repository.id)
                 ).first()
@@ -107,7 +108,13 @@ class IndexCoordinator:
 
             self._progress(job_id, 10, "Synchronizing repository")
             root, commit = sync_repository(
-                self.settings, repository_id, job_id, git_url, branch, ssh_key_path
+                self.settings,
+                repository_id,
+                job_id,
+                git_url,
+                branch,
+                ssh_key_path,
+                commit=requested_commit,
             )
             checkout_path = root
             created_generation = IndexGeneration(repository_id=repository_id, commit=commit)

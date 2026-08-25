@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from git import Repo
+from git.cmd import Git
 from sqlalchemy import create_engine, text
 from sqlmodel import Session
 
@@ -172,6 +173,82 @@ def test_git_sync_uses_incremental_cache_and_immutable_worktrees(
     assert (first_path / "demo.py").read_text(encoding="utf-8") == "value = 1\n"
     assert (second_path / "demo.py").read_text(encoding="utf-8") == "value = 2\n"
     assert (settings.repositories_dir / ".cache" / "repository" / ".git").is_dir()
+
+
+def test_git_sync_retries_transient_clone_failure_and_cleans_partial_cache(
+    settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    upstream_path = tmp_path / "upstream-retry"
+    upstream = Repo.init(upstream_path)
+    upstream.git.checkout("-b", "main")
+    (upstream_path / "demo.py").write_text("value = 1\n", encoding="utf-8")
+    upstream.index.add(["demo.py"])
+    upstream.index.commit("first")
+    monkeypatch.setattr(
+        "codeatlas.repositories.validate_public_git_url", lambda url, _hosts: url
+    )
+    original_execute = Git.execute
+    attempts = 0
+
+    def flaky_execute(self, command, *args, **kwargs):
+        nonlocal attempts
+        if len(command) > 1 and command[1] == "clone":
+            attempts += 1
+        if attempts == 1 and len(command) > 1 and command[1] == "clone":
+            partial = Path(command[-1])
+            partial.mkdir(parents=True, exist_ok=True)
+            (partial / "partial").write_text("incomplete", encoding="utf-8")
+            raise OSError("Failed to connect to github.com port 443: Connection timed out")
+        return original_execute(self, command, *args, **kwargs)
+
+    monkeypatch.setattr("git.cmd.Git.execute", flaky_execute)
+    monkeypatch.setattr("codeatlas.repositories.time.sleep", lambda _seconds: None)
+
+    checkout, commit = sync_repository(
+        settings, "retry-repository", "retry-job", str(upstream_path), "main"
+    )
+
+    assert attempts == 2
+    assert commit == upstream.head.commit.hexsha
+    assert (checkout / "demo.py").read_text(encoding="utf-8") == "value = 1\n"
+    assert not (settings.repositories_dir / ".cache" / "retry-repository" / "partial").exists()
+
+
+def test_public_github_sync_uses_codeload_snapshot(
+    settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CODEATLAS_ALLOW_PRIVATE_GIT_HOSTS", "true")
+    source = tmp_path / "snapshot-source"
+    nested = source / "yt-dlp-commit"
+    nested.mkdir(parents=True)
+    (nested / "demo.py").write_text("value = 1\n", encoding="utf-8")
+    archive = tmp_path / "snapshot.tar.gz"
+    import tarfile
+
+    with tarfile.open(archive, "w:gz") as bundle:
+        bundle.add(nested, arcname=nested.name)
+    requested: list[str] = []
+
+    def download(url: str, destination: Path, _timeout: int) -> None:
+        requested.append(url)
+        destination.write_bytes(archive.read_bytes())
+
+    monkeypatch.setattr("codeatlas.repositories._download_file", download)
+
+    checkout, commit = sync_repository(
+        settings,
+        "public-snapshot",
+        "snapshot-job",
+        "https://github.com/yt-dlp/yt-dlp.git",
+        "master",
+        commit="c" * 40,
+    )
+
+    assert commit == "c" * 40
+    assert requested == [
+        "https://codeload.github.com/yt-dlp/yt-dlp/tar.gz/" + "c" * 40
+    ]
+    assert (checkout / "demo.py").read_text(encoding="utf-8") == "value = 1\n"
 
 
 def test_repository_scope_isolates_private_repositories(

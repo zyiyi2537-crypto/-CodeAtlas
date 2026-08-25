@@ -6,12 +6,14 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi.testclient import TestClient
 
+from codeatlas.github import GitHubBranchNotFoundError
 from tests.conftest import login_admin
 
 
 def test_admin_can_generate_key_and_create_github_source(
-    client: TestClient, admin
+    client: TestClient, admin, monkeypatch
 ) -> None:
+    monkeypatch.setattr("codeatlas.api.remote_commit", lambda *_args, **_kwargs: "a" * 40)
     csrf = login_admin(client)
     headers = {"X-CSRF-Token": csrf}
 
@@ -66,6 +68,12 @@ def test_public_github_source_accepts_https_without_deploy_key(
     client: TestClient, admin, monkeypatch
 ) -> None:
     monkeypatch.setenv("CODEATLAS_ALLOW_PRIVATE_GIT_HOSTS", "true")
+    monkeypatch.setattr(
+        "codeatlas.api.remote_commit",
+        lambda _settings, _url, branch, _key="": (
+            "a" * 40 if branch == "master" else ""
+        ),
+    )
     csrf = login_admin(client)
     response = client.post(
         "/api/v1/github-sources",
@@ -83,6 +91,34 @@ def test_public_github_source_accepts_https_without_deploy_key(
     assert payload["repo_url"] == "https://github.com/yt-dlp/yt-dlp.git"
     assert payload["branch"] == "master"
     assert payload["deploy_key_configured"] is False
+
+
+def test_github_source_rejects_missing_branch_before_saving(
+    client: TestClient, admin, monkeypatch
+) -> None:
+    monkeypatch.setenv("CODEATLAS_ALLOW_PRIVATE_GIT_HOSTS", "true")
+    monkeypatch.setattr(
+        "codeatlas.api.remote_commit",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            GitHubBranchNotFoundError("GitHub branch does not exist: main")
+        ),
+    )
+    csrf = login_admin(client)
+
+    response = client.post(
+        "/api/v1/github-sources",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "name": "invalid-branch",
+            "repo_url": "https://github.com/yt-dlp/yt-dlp.git",
+            "branch": "main",
+            "visibility": "public",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "branch" in response.json()["detail"].lower()
+    assert client.get("/api/v1/github-sources").json() == []
 
 
 def test_private_github_source_requires_deploy_key(client: TestClient, admin) -> None:

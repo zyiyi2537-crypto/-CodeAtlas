@@ -31,7 +31,14 @@ from .embeddings import (
     resolve_embedding_api_key,
     settings_for_profile,
 )
-from .github import generate_deploy_key, repository_identity, resolve_deploy_key
+from .github import (
+    GitHubBranchNotFoundError,
+    GitHubError,
+    generate_deploy_key,
+    remote_commit,
+    repository_identity,
+    resolve_deploy_key,
+)
 from .gitlab import GitLabClient, GitLabClientError
 from .job_queue import ActiveIndexJobError, JobRequest
 from .knowledge_search import KnowledgeSearch
@@ -440,7 +447,17 @@ def create_github_source(payload: GitHubSourceCreate, request: Request):
                 key_path = resolve_deploy_key(request.app.state.settings, payload.ssh_key_id)
             else:
                 key_path = None
+            remote_commit(
+                request.app.state.settings,
+                git_url,
+                branch,
+                key_path or "",
+            )
             name = validate_repository_name(repository_name)
+        except GitHubBranchNotFoundError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+        except GitHubError as exc:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
         if session.exec(
