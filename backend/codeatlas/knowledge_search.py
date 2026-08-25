@@ -4,14 +4,39 @@ import json
 
 from sqlmodel import Session, col, select
 
-from .models import DocumentChunkRecord, WikiPage
+from .documents import StructuredBlock, split_structured_blocks
+from .embeddings import EmbeddingClient
+from .models import DocumentChunkRecord, EmbeddingProfile, WikiPage
+from .settings import Settings
+from .vector_store import KnowledgeVectorChunk, VectorStore
 
 
 class KnowledgeSearch:
-    """Searches project documents and source-tracked Wiki pages."""
+    """Unified structural/semantic retrieval for documents and Wiki pages."""
 
-    def __init__(self, engine):
+    def __init__(self, engine, settings: Settings | None = None):
         self.engine = engine
+        self.settings = settings
+        vector_settings, namespace = self._embedding_context()
+        self.vector_settings = vector_settings
+        self.vector_store = VectorStore(vector_settings, namespace=namespace)
+        self.embedder = EmbeddingClient(vector_settings)
+
+    def _embedding_context(self) -> tuple[Settings, str]:
+        if self.settings is None:
+            raise ValueError("KnowledgeSearch requires application settings")
+        try:
+            from .embeddings import settings_for_profile
+
+            with Session(self.engine) as session:
+                profile = session.exec(
+                    select(EmbeddingProfile).where(EmbeddingProfile.is_active)
+                ).first()
+            if profile:
+                return settings_for_profile(self.settings, profile), profile.id
+        except (AttributeError, TypeError):
+            pass
+        return self.settings, "default"
 
     @staticmethod
     def _terms(query: str) -> list[str]:
@@ -20,58 +45,192 @@ class KnowledgeSearch:
             raise ValueError("query must contain between 1 and 500 characters")
         return [term.lower() for term in normalized.split() if term.strip()]
 
-    def search_documents(
-        self, query: str, collection_ids: list[str] | tuple[str, ...] | None = None
-    ) -> list[dict]:
-        terms = self._terms(query)
+    def _document_rows(
+        self, collection_ids: list[str] | tuple[str, ...] | None = None
+    ) -> list[DocumentChunkRecord]:
         with Session(self.engine) as session:
             statement = select(DocumentChunkRecord)
             if collection_ids:
                 statement = statement.where(
                     col(DocumentChunkRecord.collection_id).in_(collection_ids)
                 )
-            rows = session.exec(statement).all()
+            return list(session.exec(statement).all())
 
-        results = []
-        for row in rows:
-            haystack = f"{row.title} {row.section} {row.content}".lower()
-            score = sum(haystack.count(term) for term in terms)
-            if score:
-                results.append(
-                    {
+    def _wiki_rows(self) -> list[WikiPage]:
+        with Session(self.engine) as session:
+            return list(
+                session.exec(select(WikiPage).where(WikiPage.status == "published")).all()
+            )
+
+    def index_document(self, chunks: list[DocumentChunkRecord]) -> None:
+        if chunks:
+            self.vector_store.delete_source("document", chunks[0].document_id)
+        vectors = []
+        for chunk in chunks:
+            metadata = json.loads(chunk.metadata_json or "{}")
+            vectors.append(
+                KnowledgeVectorChunk(
+                    id=chunk.id,
+                    content=chunk.content,
+                    metadata={
                         "source_type": "document",
-                        "document_id": row.document_id,
+                        "source_id": chunk.document_id,
+                        "collection_id": chunk.collection_id,
+                        "title": chunk.title,
+                        "section": chunk.section,
+                        "page": chunk.page or 0,
+                        "structure_type": chunk.structure_type,
+                        "ordinal": int(metadata.get("ordinal", 0)),
+                    },
+                )
+            )
+        if vectors:
+            self.vector_store.add_knowledge(vectors, self.embedder)
+
+    def index_wiki(self, page: WikiPage) -> None:
+        blocks = self._wiki_blocks(page)
+        chunks = split_structured_blocks(page.title, blocks)
+        vectors = [
+            KnowledgeVectorChunk(
+                id=f"wiki:{page.id}:{index}",
+                content=chunk.content,
+                metadata={
+                    "source_type": "wiki",
+                    "source_id": page.id,
+                    "collection_id": "",
+                    "title": page.title,
+                    "section": chunk.section,
+                    "page": 0,
+                    "structure_type": chunk.structure_type,
+                    "path": page.path,
+                },
+            )
+            for index, chunk in enumerate(chunks, start=1)
+        ]
+        self.vector_store.delete_source("wiki", page.id)
+        if vectors:
+            self.vector_store.add_knowledge(vectors, self.embedder)
+
+    def rebuild_all(self) -> dict[str, int]:
+        document_chunks = self._document_rows()
+        chunks_by_document: dict[str, list[DocumentChunkRecord]] = {}
+        for chunk in document_chunks:
+            chunks_by_document.setdefault(chunk.document_id, []).append(chunk)
+        for chunks in chunks_by_document.values():
+            self.index_document(chunks)
+        wiki_pages = self._wiki_rows()
+        for page in wiki_pages:
+            self.index_wiki(page)
+        return {
+            "document_chunks": len(document_chunks),
+            "wiki_pages": len(wiki_pages),
+        }
+
+    @staticmethod
+    def _wiki_blocks(page: WikiPage) -> list[StructuredBlock]:
+        from .documents import extract_structured_blocks
+
+        return extract_structured_blocks(page.path, page.content.encode("utf-8"))
+
+    def search(
+        self,
+        query: str,
+        source_types: list[str] | None = None,
+        collection_ids: list[str] | tuple[str, ...] | None = None,
+        limit: int = 10,
+    ) -> list[dict]:
+        terms = self._terms(query)
+        wanted = source_types or ["document", "wiki"]
+        lexical: dict[str, dict] = {}
+        if "document" in wanted:
+            for row in self._document_rows(collection_ids):
+                score = self._lexical_score(terms, f"{row.title} {row.section} {row.content}")
+                if score:
+                    lexical[row.id] = {
+                        "id": row.id,
+                        "source_type": "document",
+                        "source_id": row.document_id,
                         "collection_id": row.collection_id,
                         "title": row.title,
                         "section": row.section,
                         "page": row.page,
                         "content": row.content,
-                        "score": score,
+                        "lexical_score": score,
                     }
-                )
-        return sorted(results, key=lambda item: int(str(item["score"])), reverse=True)[:10]
+        if "wiki" in wanted:
+            for page in self._wiki_rows():
+                score = self._lexical_score(terms, f"{page.title} {page.content}")
+                if score:
+                    lexical[f"wiki:{page.id}:1"] = {
+                        "id": f"wiki:{page.id}:1",
+                        "source_type": "wiki",
+                        "source_id": page.id,
+                        "collection_id": "",
+                        "title": page.title,
+                        "section": page.path,
+                        "page": None,
+                        "path": page.path,
+                        "sources": json.loads(page.sources_json),
+                        "content": page.content,
+                        "lexical_score": score,
+                    }
+        vector = self.vector_store.search_knowledge(
+            self.embedder.embed([query])[0],
+            wanted,
+            max(limit * 3, 20),
+            list(collection_ids) if collection_ids else None,
+        )
+        pool: dict[str, dict] = dict(lexical)
+        for rank, candidate in enumerate(vector, start=1):
+            metadata = candidate["metadata"]
+            item = pool.setdefault(
+                candidate["id"],
+                {
+                    "id": candidate["id"],
+                    "source_type": metadata.get("source_type", "document"),
+                    "source_id": metadata.get("source_id", ""),
+                    "collection_id": metadata.get("collection_id", ""),
+                    "title": metadata.get("title", ""),
+                    "section": metadata.get("section", ""),
+                    "page": metadata.get("page") or None,
+                    "path": metadata.get("path", ""),
+                    "content": candidate["document"],
+                    "lexical_score": 0,
+                },
+            )
+            item["vector_score"] = candidate["vector_score"]
+            item["vector_rank"] = rank
+        for item in pool.values():
+            vector_score = float(item.get("vector_score", 0))
+            lexical_score = float(item.get("lexical_score", 0))
+            item["retrieval"] = (
+                "hybrid"
+                if vector_score and lexical_score
+                else "vector" if vector_score else "lexical"
+            )
+            item["score"] = vector_score + min(1.0, lexical_score / 5.0)
+        return sorted(pool.values(), key=lambda item: item["score"], reverse=True)[:limit]
+
+    @staticmethod
+    def _lexical_score(terms: list[str], text: str) -> int:
+        haystack = text.lower()
+        return sum(haystack.count(term) for term in terms)
+
+    def search_documents(
+        self, query: str, collection_ids: list[str] | tuple[str, ...] | None = None
+    ) -> list[dict]:
+        results = self.search(
+            query,
+            source_types=["document"],
+            collection_ids=collection_ids,
+        )
+        return [
+            {**item, "document_id": item["source_id"]}
+            for item in results
+        ]
 
     def search_wiki(self, query: str) -> list[dict]:
-        terms = self._terms(query)
-        with Session(self.engine) as session:
-            pages = session.exec(select(WikiPage).where(WikiPage.status == "published")).all()
-
-        results = []
-        for page in pages:
-            haystack = f"{page.title} {page.content}".lower()
-            score = sum(haystack.count(term) for term in terms)
-            if score:
-                results.append(
-                    {
-                        "source_type": "wiki",
-                        "path": page.path,
-                        "title": page.title,
-                        "content": page.content,
-                        "sources": json.loads(page.sources_json),
-                        "score": score,
-                    }
-                )
-        return sorted(results, key=lambda item: int(str(item["score"])), reverse=True)[:10]
+        return self.search(query, source_types=["wiki"])
 
     def get_wiki_page(self, path: str) -> dict:
         with Session(self.engine) as session:

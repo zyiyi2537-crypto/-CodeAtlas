@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import base64
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi.testclient import TestClient
 
 from tests.conftest import login_admin
@@ -14,6 +18,14 @@ def test_admin_can_generate_key_and_create_github_source(
     key = client.post("/api/v1/github-keys", headers=headers)
     assert key.status_code == 201
     assert key.json()["public_key"].startswith("ssh-ed25519 ")
+    fields = key.json()["public_key"].split()
+    assert len(fields) == 3
+    assert "\n" not in key.json()["public_key"]
+    decoded = base64.b64decode(fields[1], validate=True)
+    Ed25519PublicKey.from_public_bytes(decoded[-32:]).public_bytes(
+        serialization.Encoding.OpenSSH,
+        serialization.PublicFormat.OpenSSH,
+    )
     key_id = key.json()["key_id"]
     assert key_id in key.json()["public_key"]
 

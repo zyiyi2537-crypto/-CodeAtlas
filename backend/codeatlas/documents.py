@@ -1,122 +1,413 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
-import zipfile
+from dataclasses import dataclass, field
+from io import BytesIO
 from pathlib import Path
-from xml.etree import ElementTree
+from typing import Any
+
+import pymupdf
+from docx import Document as DocxDocument
+from docx.table import Table as DocxTable
+from docx.text.paragraph import Paragraph as DocxParagraph
+from openpyxl import load_workbook
+from pptx import Presentation
 
 from .models import DocumentChunkRecord
 from .security import redact_secrets
 
-_ALLOWED = {".md", ".markdown", ".txt", ".csv", ".docx", ".xlsx"}
+_ALLOWED = {".md", ".markdown", ".txt", ".csv", ".docx", ".xlsx", ".pdf", ".pptx"}
+
+
+@dataclass(frozen=True)
+class StructuredBlock:
+    kind: str
+    title: str
+    text: str
+    hierarchy: tuple[str, ...] = ()
+    ordinal: int = 0
+    page: int | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class StructuredChunk:
+    section: str
+    structure_type: str
+    content: str
+    page: int | None
+    metadata: dict[str, Any]
+
+
+def _paragraph_parts(text: str, max_chars: int) -> list[str]:
+    paragraphs = [item.strip() for item in re.split(r"\n\s*\n", text) if item.strip()]
+    parts: list[str] = []
+    current = ""
+    for paragraph in paragraphs:
+        candidate = f"{current}\n\n{paragraph}".strip() if current else paragraph
+        if current and len(candidate) > max_chars:
+            parts.append(current)
+            current = paragraph
+        else:
+            current = candidate
+        while len(current) > max_chars:
+            boundaries = [
+                current.rfind("。", 0, max_chars),
+                current.rfind(". ", 0, max_chars),
+                current.rfind("；", 0, max_chars),
+                current.rfind("; ", 0, max_chars),
+            ]
+            boundary = max(boundaries)
+            boundary = boundary + 1 if boundary >= max_chars // 2 else max_chars
+            parts.append(current[:boundary].strip())
+            current = current[boundary:].strip()
+    if current:
+        parts.append(current)
+    return parts
+
+
+def split_structured_blocks(
+    document_title: str, blocks: list[StructuredBlock], max_chars: int = 3500
+) -> list[StructuredChunk]:
+    chunks: list[StructuredChunk] = []
+    for block in blocks:
+        if block.kind == "ocr-required":
+            continue
+        hierarchy = block.hierarchy or ((block.title,) if block.title else ())
+        section = " > ".join(item for item in hierarchy if item)
+        for index, part in enumerate(_paragraph_parts(block.text, max_chars), start=1):
+            content = (
+                f"Document: {document_title}\nSection: {section}\n"
+                f"Structure: {block.kind}\n\n{part}"
+            )
+            chunks.append(
+                StructuredChunk(
+                    section=section,
+                    structure_type=block.kind,
+                    content=content,
+                    page=block.page,
+                    metadata={
+                        **block.metadata,
+                        "ordinal": block.ordinal,
+                        "part": index,
+                        "split_strategy": "paragraph",
+                    },
+                )
+            )
+    return chunks
+
+
+def _markdown_blocks(text: str) -> list[StructuredBlock]:
+    blocks: list[StructuredBlock] = []
+    hierarchy: list[str] = []
+    body: list[str] = []
+    ordinal = 0
+
+    def flush() -> None:
+        nonlocal ordinal, body
+        value = "\n".join(body).strip()
+        if value:
+            ordinal += 1
+            blocks.append(
+                StructuredBlock(
+                    kind="section",
+                    title=hierarchy[-1] if hierarchy else "",
+                    text=value,
+                    hierarchy=tuple(hierarchy),
+                    ordinal=ordinal,
+                )
+            )
+        body = []
+
+    for line in text.splitlines():
+        match = re.match(r"^(#{1,6})\s+(.+)$", line.strip())
+        if match:
+            flush()
+            level = len(match.group(1))
+            hierarchy[:] = hierarchy[: level - 1]
+            hierarchy.append(match.group(2).strip())
+        else:
+            body.append(line)
+    flush()
+    return blocks
+
+
+def _docx_blocks(content: bytes) -> list[StructuredBlock]:
+    document = DocxDocument(BytesIO(content))
+    blocks: list[StructuredBlock] = []
+    hierarchy: list[str] = []
+    ordinal = 0
+    body: list[str] = []
+
+    def flush_body() -> None:
+        nonlocal ordinal, body
+        text = "\n\n".join(item for item in body if item).strip()
+        if text:
+            ordinal += 1
+            blocks.append(
+                StructuredBlock(
+                    kind="section",
+                    title=hierarchy[-1] if hierarchy else "",
+                    text=text,
+                    hierarchy=tuple(hierarchy),
+                    ordinal=ordinal,
+                )
+            )
+        body = []
+
+    for item in document.iter_inner_content():
+        if isinstance(item, DocxParagraph):
+            text = item.text.strip()
+            if not text:
+                continue
+            style = item.style.name if item.style else ""
+            match = re.match(r"Heading\s+([1-6])$", style, re.IGNORECASE)
+            if match:
+                flush_body()
+                level = int(match.group(1))
+                hierarchy[:] = hierarchy[: level - 1]
+                hierarchy.append(text)
+            else:
+                body.append(text)
+        elif isinstance(item, DocxTable):
+            flush_body()
+            rows = [
+                [cell.text.strip().replace("\n", " ") for cell in row.cells]
+                for row in item.rows
+            ]
+            if rows:
+                ordinal += 1
+                blocks.append(
+                    StructuredBlock(
+                        kind="table",
+                        title=hierarchy[-1] if hierarchy else "Table",
+                        text="\n".join(" | ".join(row) for row in rows),
+                        hierarchy=tuple(hierarchy),
+                        ordinal=ordinal,
+                        metadata={"header": rows[0], "row_count": len(rows) - 1},
+                    )
+                )
+    flush_body()
+    return blocks
+
+
+def _xlsx_blocks(content: bytes, rows_per_block: int = 50) -> list[StructuredBlock]:
+    workbook = load_workbook(BytesIO(content), data_only=False, read_only=True)
+    blocks: list[StructuredBlock] = []
+    ordinal = 0
+    for sheet in workbook.worksheets:
+        rows = [
+            ["" if value is None else str(value) for value in row]
+            for row in sheet.iter_rows(values_only=True)
+        ]
+        rows = [row for row in rows if any(cell.strip() for cell in row)]
+        if not rows:
+            continue
+        header, data = rows[0], rows[1:]
+        groups = [
+            data[offset : offset + rows_per_block]
+            for offset in range(0, len(data), rows_per_block)
+        ] or [[]]
+        for group_index, group in enumerate(groups, start=1):
+            ordinal += 1
+            blocks.append(
+                StructuredBlock(
+                    kind="table",
+                    title=sheet.title,
+                    text="\n".join(
+                        [" | ".join(header), *[" | ".join(row) for row in group]]
+                    ),
+                    hierarchy=(sheet.title,),
+                    ordinal=ordinal,
+                    metadata={
+                        "sheet": sheet.title,
+                        "header": header,
+                        "row_start": 2 + (group_index - 1) * rows_per_block,
+                        "row_end": 1 + (group_index - 1) * rows_per_block + len(group),
+                    },
+                )
+            )
+    return blocks
+
+
+def _pdf_blocks(content: bytes) -> list[StructuredBlock]:
+    document = pymupdf.open(stream=content, filetype="pdf")
+    blocks: list[StructuredBlock] = []
+    for page_number in range(1, document.page_count + 1):
+        page = document.load_page(page_number - 1)
+        raw_blocks = sorted(page.get_text("blocks"), key=lambda item: (round(item[1]), item[0]))
+        texts = [str(item[4]).strip() for item in raw_blocks if str(item[4]).strip()]
+        if not texts:
+            blocks.append(
+                StructuredBlock(
+                    kind="ocr-required",
+                    title=f"Page {page_number}",
+                    text=f"Page {page_number} contains no extractable text and requires OCR.",
+                    hierarchy=(f"Page {page_number}",),
+                    ordinal=page_number,
+                    page=page_number,
+                    metadata={"requires_ocr": True},
+                )
+            )
+            continue
+        title = next(
+            (line for line in texts[0].splitlines() if line.strip()),
+            f"Page {page_number}",
+        )
+        blocks.append(
+            StructuredBlock(
+                kind="page",
+                title=title,
+                text="\n\n".join(texts),
+                hierarchy=(title,),
+                ordinal=page_number,
+                page=page_number,
+                metadata={"requires_ocr": False},
+            )
+        )
+    return blocks
+
+
+def _pptx_blocks(content: bytes) -> list[StructuredBlock]:
+    presentation = Presentation(BytesIO(content))
+    blocks: list[StructuredBlock] = []
+    ordinal = 0
+    for slide_number, slide in enumerate(presentation.slides, start=1):
+        title_shape = slide.shapes.title
+        title = title_shape.text.strip() if title_shape else f"Slide {slide_number}"
+        body = []
+        for shape in slide.shapes:
+            if shape is title_shape or not getattr(shape, "has_text_frame", False):
+                continue
+            text = shape.text.strip()
+            if text:
+                body.append(text)
+        if body:
+            ordinal += 1
+            blocks.append(
+                StructuredBlock(
+                    kind="slide",
+                    title=title,
+                    text="\n\n".join(body),
+                    hierarchy=(title,),
+                    ordinal=ordinal,
+                    page=slide_number,
+                    metadata={"slide": slide_number},
+                )
+            )
+        for shape in slide.shapes:
+            if not getattr(shape, "has_table", False):
+                continue
+            rows = [
+                [cell.text.strip().replace("\n", " ") for cell in row.cells]
+                for row in shape.table.rows
+            ]
+            ordinal += 1
+            blocks.append(
+                StructuredBlock(
+                    kind="table",
+                    title=title,
+                    text="\n".join(" | ".join(row) for row in rows),
+                    hierarchy=(title,),
+                    ordinal=ordinal,
+                    page=slide_number,
+                    metadata={"slide": slide_number, "header": rows[0] if rows else []},
+                )
+            )
+        notes = slide.notes_slide.notes_text_frame.text.strip()
+        notes = "\n".join(
+            line for line in notes.splitlines() if line.strip() and line.strip() != title
+        ).strip()
+        if notes:
+            ordinal += 1
+            blocks.append(
+                StructuredBlock(
+                    kind="notes",
+                    title=title,
+                    text=notes,
+                    hierarchy=(title, "Notes"),
+                    ordinal=ordinal,
+                    page=slide_number,
+                    metadata={"slide": slide_number},
+                )
+            )
+    return blocks
+
+
+def extract_structured_blocks(filename: str, content: bytes) -> list[StructuredBlock]:
+    suffix = Path(filename).suffix.lower()
+    if suffix not in _ALLOWED:
+        raise ValueError(
+            "supported document types are Markdown, TXT, CSV, DOCX, XLSX, PDF and PPTX"
+        )
+    try:
+        if suffix == ".docx":
+            blocks = _docx_blocks(content)
+        elif suffix == ".xlsx":
+            blocks = _xlsx_blocks(content)
+        elif suffix == ".pdf":
+            blocks = _pdf_blocks(content)
+        elif suffix == ".pptx":
+            blocks = _pptx_blocks(content)
+        else:
+            blocks = _markdown_blocks(content.decode("utf-8-sig"))
+    except UnicodeDecodeError as exc:
+        raise ValueError("document must be UTF-8 text") from exc
+    except (KeyError, ValueError, OSError) as exc:
+        raise ValueError(f"invalid {suffix.removeprefix('.').upper()} document") from exc
+    return [
+        StructuredBlock(
+            kind=block.kind,
+            title=block.title,
+            text=redact_secrets(block.text),
+            hierarchy=block.hierarchy,
+            ordinal=block.ordinal,
+            page=block.page,
+            metadata=block.metadata,
+        )
+        for block in blocks
+    ]
 
 
 def extract_text(filename: str, content: bytes) -> str:
-    suffix = Path(filename).suffix.lower()
-    if suffix not in _ALLOWED:
-        raise ValueError("supported document types are Markdown, TXT, CSV, DOCX and XLSX")
-    if suffix == ".docx":
-        return redact_secrets(_extract_docx(content))
-    if suffix == ".xlsx":
-        return redact_secrets(_extract_xlsx(content))
-    try:
-        text = content.decode("utf-8-sig")
-    except UnicodeDecodeError as exc:
-        raise ValueError("document must be UTF-8 text") from exc
-    return redact_secrets(text)
-
-
-def _extract_docx(content: bytes) -> str:
-    try:
-        with zipfile.ZipFile(__import__("io").BytesIO(content)) as archive:
-            root = ElementTree.fromstring(archive.read("word/document.xml"))
-    except (KeyError, ValueError, zipfile.BadZipFile) as exc:
-        raise ValueError("invalid DOCX document") from exc
-    namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-    paragraphs = []
-    for paragraph in root.iter(f"{namespace}p"):
-        text = "".join(node.text or "" for node in paragraph.iter(f"{namespace}t"))
-        if text.strip():
-            paragraphs.append(text.strip())
-    return "\n\n".join(paragraphs)
-
-
-def _extract_xlsx(content: bytes) -> str:
-    try:
-        with zipfile.ZipFile(__import__("io").BytesIO(content)) as archive:
-            shared = []
-            if "xl/sharedStrings.xml" in archive.namelist():
-                root = ElementTree.fromstring(archive.read("xl/sharedStrings.xml"))
-                shared = ["".join(node.text or "" for node in item.iter()) for item in root]
-            workbook = ElementTree.fromstring(archive.read("xl/workbook.xml"))
-            rels = ElementTree.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
-            rel_map = {item.attrib["Id"]: item.attrib["Target"] for item in rels}
-            rows = []
-            for sheet in workbook.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}sheet"):
-                rel_id = sheet.attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
-                if not rel_id:
-                    continue
-                target = rel_map.get(rel_id, "")
-                target = target.lstrip("/") if target.startswith("/") else "xl/" + target
-                root = ElementTree.fromstring(archive.read(target))
-                rows.append(f"## Sheet: {sheet.attrib.get('name', 'Sheet')}" )
-                for row in root.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}row"):
-                    values = []
-                    for cell in row:
-                        value = next(
-                            iter(cell.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}v")),
-                            None,
-                        )
-                        text = value.text if value is not None else ""
-                        if cell.attrib.get("t") == "s" and text and text.isdigit():
-                            text = shared[int(text)]
-                        values.append(text or "")
-                    if values:
-                        rows.append(" | ".join(values))
-            return "\n".join(rows)
-    except (KeyError, ValueError, zipfile.BadZipFile, IndexError) as exc:
-        raise ValueError("invalid XLSX document") from exc
+    return "\n\n".join(block.text for block in extract_structured_blocks(filename, content))
 
 
 def chunk_document(
-    title: str, document_id: str, collection_id: str, text: str, max_chars: int = 3500
+    title: str,
+    document_id: str,
+    collection_id: str,
+    text: str | None = None,
+    max_chars: int = 3500,
+    *,
+    blocks: list[StructuredBlock] | None = None,
 ) -> list[DocumentChunkRecord]:
-    sections: list[tuple[str, str]] = []
-    heading = ""
-    body: list[str] = []
-    for line in text.splitlines():
-        match = re.match(r"^#{1,6}\s+(.+)$", line.strip())
-        if match:
-            if body:
-                sections.append((heading, "\n".join(body).strip()))
-            heading = match.group(1).strip()
-            body = []
-        else:
-            body.append(line)
-    if body:
-        sections.append((heading, "\n".join(body).strip()))
-
+    structured = blocks if blocks is not None else _markdown_blocks(text or "")
     chunks: list[DocumentChunkRecord] = []
-    for section, body_text in sections:
-        if not body_text:
-            continue
-        for offset in range(0, len(body_text), max_chars):
-            part = body_text[offset : offset + max_chars].strip()
-            if not part:
-                continue
-            content = f"Document: {title}\nSection: {section}\n\n{part}"
-            chunk_id = hashlib.sha256(
-                f"{document_id}|{section}|{offset}|{part}".encode()
-            ).hexdigest()
-            chunks.append(
-                DocumentChunkRecord(
-                    id=chunk_id,
-                    document_id=document_id,
-                    collection_id=collection_id,
-                    title=title,
-                    section=section,
-                    content=content,
-                )
+    for chunk in split_structured_blocks(title, structured, max_chars):
+        metadata_json = json.dumps(
+            {
+                "structure_type": chunk.structure_type,
+                **chunk.metadata,
+            },
+            ensure_ascii=False,
+        )
+        chunk_id = hashlib.sha256(
+            f"{document_id}|{chunk.section}|{chunk.page}|{metadata_json}|{chunk.content}".encode()
+        ).hexdigest()
+        chunks.append(
+            DocumentChunkRecord(
+                id=chunk_id,
+                document_id=document_id,
+                collection_id=collection_id,
+                title=title,
+                section=chunk.section,
+                page=chunk.page,
+                structure_type=chunk.structure_type,
+                metadata_json=metadata_json,
+                content=chunk.content,
             )
+        )
     return chunks

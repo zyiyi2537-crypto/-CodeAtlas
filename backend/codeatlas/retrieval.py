@@ -21,16 +21,17 @@ class CodeRetriever:
         self.settings = settings
         self.engine = engine
         self.embedder = EmbeddingClient(settings)
-        self.vector_store = VectorStore(settings)
+        active_settings, namespace = self._current_embedding_context()
+        self.vector_store = VectorStore(active_settings, namespace=namespace)
 
-    def _current_embedder(self) -> EmbeddingClient:
+    def _current_embedding_context(self) -> tuple[Settings, str]:
         with Session(self.engine) as session:
             profile = session.exec(
                 select(EmbeddingProfile).where(EmbeddingProfile.is_active)
             ).first()
         if profile:
-            return EmbeddingClient(settings_for_profile(self.settings, profile))
-        return self.embedder
+            return settings_for_profile(self.settings, profile), profile.id
+        return self.settings, "default"
 
     def allowed_repositories(
         self,
@@ -94,8 +95,13 @@ class CodeRetriever:
         if not generation_ids:
             return []
         candidate_limit = 50
-        vector = self.vector_store.search(
-            self._current_embedder().embed([query])[0], generation_ids, candidate_limit
+        embedding_settings, namespace = self._current_embedding_context()
+        vector_store = VectorStore(embedding_settings, namespace=namespace)
+        self.vector_store = vector_store
+        vector = vector_store.search(
+            EmbeddingClient(embedding_settings).embed([query])[0],
+            generation_ids,
+            candidate_limit,
         )
         lexical = self._lexical_candidates(query, generation_ids, candidate_limit)
         allowed_languages = {value.lower() for value in (languages or [])}
@@ -113,6 +119,57 @@ class CodeRetriever:
             [candidate for candidate in lexical if matches(candidate)],
             max(1, min(limit, 10)),
         )
+
+    def search_knowledge(
+        self,
+        query: str,
+        user: User | None = None,
+        repository_ids: list[str] | None = None,
+        collection_ids: list[str] | None = None,
+        source_types: list[str] | None = None,
+        limit: int = 10,
+    ) -> list[dict]:
+        wanted = source_types or ["code", "document", "wiki"]
+        code_results = (
+            self.search(
+                query,
+                user,
+                repository_ids=repository_ids,
+                limit=limit,
+            )
+            if "code" in wanted
+            else []
+        )
+        knowledge_types = [
+            value for value in wanted if value in {"document", "wiki"}
+        ]
+        if knowledge_types:
+            from .knowledge_search import KnowledgeSearch
+
+            knowledge_results = KnowledgeSearch(self.engine, self.settings).search(
+                query,
+                source_types=knowledge_types,
+                collection_ids=collection_ids,
+                limit=limit,
+            )
+        else:
+            knowledge_results = []
+        normalized_code = [
+            {
+                **item,
+                "source_type": "code",
+                "source_id": item["repo"],
+                "title": item["path"],
+                "section": item["symbol"],
+                "content": item["snippet"],
+            }
+            for item in code_results
+        ]
+        return sorted(
+            [*normalized_code, *knowledge_results],
+            key=lambda item: float(item.get("score", 0)),
+            reverse=True,
+        )[:limit]
 
     def _lexical_candidates(
         self, query: str, generation_ids: list[str], limit: int

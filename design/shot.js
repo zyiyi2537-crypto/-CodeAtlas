@@ -1,14 +1,15 @@
 const { chromium } = require('playwright');
+const { pathToFileURL } = require('node:url');
+const path = require('node:path');
 
 (async () => {
-  const browser = await chromium.launch({
-    proxy: { server: 'http://127.0.0.1:7897' },
-  });
+  const browser = await chromium.launch();
   const page = await browser.newPage({
     viewport: { width: 1440, height: 1000 },
     deviceScaleFactor: 2,
   });
-  await page.goto('file:///D:/agent%20project/CodeAtlas/design/redesign-mockup.html', {
+  const mockupUrl = pathToFileURL(path.join(__dirname, 'redesign-mockup.html')).href;
+  await page.goto(mockupUrl, {
     waitUntil: 'networkidle',
     timeout: 45000,
   });

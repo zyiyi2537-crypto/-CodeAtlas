@@ -7,6 +7,7 @@ import { api, errorMessage } from '@/api'
 import { csrfHeaders } from '@/auth'
 import EmptyState from '@/components/EmptyState.vue'
 import { formatDate } from '@/format'
+import { copyText, normalizeGitHubCloneUrl, normalizeOpenSshPublicKey } from '@/sshKey'
 import type { GitHubSource } from '@/types'
 
 const queryClient = useQueryClient()
@@ -14,6 +15,7 @@ const showCreate = ref(false)
 const formError = ref('')
 const generatedKey = ref<{ key_id: string; public_key: string } | null>(null)
 const copied = ref(false)
+const keyInput = ref<HTMLInputElement | null>(null)
 const form = reactive({
   name: '',
   repo_url: 'git@github.com:owner/repository.git',
@@ -64,9 +66,18 @@ const checkSource = useMutation({
 
 async function copyKey() {
   if (!generatedKey.value) return
-  await navigator.clipboard.writeText(generatedKey.value.public_key)
-  copied.value = true
-  window.setTimeout(() => { copied.value = false }, 1400)
+  try {
+    await copyText(normalizeOpenSshPublicKey(generatedKey.value.public_key), keyInput.value ?? undefined)
+    copied.value = true
+    formError.value = ''
+    window.setTimeout(() => { copied.value = false }, 1400)
+  } catch (error) {
+    formError.value = errorMessage(error)
+  }
+}
+
+function normalizeCloneUrl() {
+  form.repo_url = normalizeGitHubCloneUrl(form.repo_url)
 }
 
 function closeDialog() {
@@ -126,13 +137,14 @@ function closeDialog() {
         </div>
         <div v-else class="key-display-block">
           <div class="section-heading"><div><h3>复制公钥到 GitHub</h3><span>Repository Settings → Deploy keys → Add deploy key → 勾选只读</span></div><Check v-if="copied" :size="18" /></div>
-          <code>{{ generatedKey.public_key }}</code>
+          <input ref="keyInput" class="ssh-public-key-field" :value="normalizeOpenSshPublicKey(generatedKey.public_key)" readonly spellcheck="false" @focus="($event.target as HTMLInputElement).select()" />
           <button class="secondary-button" type="button" @click="copyKey"><Copy :size="16" />{{ copied ? '已复制' : '复制公钥' }}</button>
+          <p class="form-hint">只复制上面这一整行。若浏览器禁止自动复制，点击输入框后按 Ctrl+C。</p>
         </div>
         <form class="stack-form two-column-form" @submit.prevent="createSource.mutate()">
           <label><span>来源名称</span><input v-model="form.name" placeholder="my-github-repo" required /></label>
           <label><span>分支</span><input v-model="form.branch" required /></label>
-          <label class="full-span"><span>SSH Clone URL</span><input v-model="form.repo_url" pattern="git@github\\.com:.+/.+\\.git" required /></label>
+          <label class="full-span"><span>SSH Clone URL</span><input v-model="form.repo_url" pattern="git@github\\.com:.+/.+\\.git" required placeholder="git@github.com:owner/repository.git" @blur="normalizeCloneUrl" /><small class="form-hint">必须是 GitHub Code → SSH 地址；粘贴 HTTPS 地址后离开输入框会自动转换。</small></label>
           <label><span>检查间隔（秒）</span><input v-model.number="form.poll_interval_seconds" type="number" min="300" max="86400" required /></label>
           <label><span>可见性</span><select v-model="form.visibility"><option value="private">private</option><option value="public">public</option></select></label>
           <label class="full-span"><span>描述</span><textarea v-model="form.description" rows="2" /></label>

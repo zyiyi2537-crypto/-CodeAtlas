@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import re
 import sys
+from dataclasses import dataclass
 from typing import Any, cast
 
 # Alibaba Cloud Linux links Python to an older system SQLite. Chroma requires
@@ -17,17 +20,37 @@ from .embeddings import EmbeddingClient
 from .settings import Settings
 
 
+@dataclass(frozen=True)
+class KnowledgeVectorChunk:
+    id: str
+    content: str
+    metadata: dict[str, str | int | float | bool]
+
+
+def _safe_namespace(value: str) -> str:
+    normalized = re.sub(r"[^a-zA-Z0-9_-]+", "-", value).strip("-").lower()
+    return (normalized[:36] or "default") + "-" + hashlib.sha256(value.encode()).hexdigest()[:8]
+
+
+def _collection_name(namespace: str, dimension: int) -> str:
+    if namespace == "default":
+        return "codeatlas_chunks"
+    return f"codeatlas_{_safe_namespace(namespace)}_{dimension}"
+
+
 class VectorStore:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, namespace: str = "default"):
         self.settings = settings
         settings.chroma_path.mkdir(parents=True, exist_ok=True)
         self.client = chromadb.PersistentClient(path=str(settings.chroma_path))
+        self.namespace = namespace
         self.collection = self.client.get_or_create_collection(
-            "codeatlas_chunks",
+            _collection_name(namespace, settings.embedding_dimension),
             metadata={
                 "hnsw:space": "cosine",
                 "embedding_dimension": settings.embedding_dimension,
                 "embedding_model": settings.embedding_model,
+                "embedding_namespace": namespace,
             },
         )
         metadata = self.collection.metadata or {}
@@ -48,6 +71,9 @@ class VectorStore:
                 documents=documents,
                 embeddings=cast(Any, embedder.embed(documents)),
                 metadatas=[{
+                    "source_type": "code",
+                    "source_id": chunk.repository_id,
+                    "collection_id": "",
                     "repo": chunk.repository_id,
                     "generation_id": chunk.generation_id,
                     "commit": chunk.commit,
@@ -58,6 +84,71 @@ class VectorStore:
                     "end_line": chunk.end_line,
                 } for chunk in batch],
             )
+
+    def add_knowledge(
+        self,
+        chunks: list[KnowledgeVectorChunk],
+        embedder: EmbeddingClient,
+        batch_size: int = 32,
+    ) -> None:
+        for offset in range(0, len(chunks), batch_size):
+            batch = chunks[offset : offset + batch_size]
+            documents = [chunk.content for chunk in batch]
+            self.collection.upsert(
+                ids=[chunk.id for chunk in batch],
+                documents=documents,
+                embeddings=cast(Any, embedder.embed(documents)),
+                metadatas=cast(Any, [chunk.metadata for chunk in batch]),
+            )
+
+    def delete_source(self, source_type: str, source_id: str) -> None:
+        if self.collection.count():
+            self.collection.delete(
+                where={"$and": [{"source_type": source_type}, {"source_id": source_id}]}
+            )
+
+    def search_knowledge(
+        self,
+        query_embedding: list[float],
+        source_types: list[str],
+        limit: int,
+        collection_ids: list[str] | None = None,
+    ) -> list[dict]:
+        if not source_types or not self.collection.count():
+            return []
+        clauses: list[dict] = [
+            {"source_type": source_types[0]}
+            if len(source_types) == 1
+            else {"source_type": {"$in": source_types}}
+        ]
+        if collection_ids:
+            clauses.append(
+                {"collection_id": collection_ids[0]}
+                if len(collection_ids) == 1
+                else {"collection_id": {"$in": collection_ids}}
+            )
+        where = clauses[0] if len(clauses) == 1 else {"$and": clauses}
+        result = self.collection.query(
+            query_embeddings=cast(Any, [query_embedding]),
+            n_results=min(max(1, limit), self.collection.count()),
+            where=cast(Any, where),
+            include=["documents", "metadatas", "distances"],
+        )
+        return [
+            {
+                "id": item_id,
+                "document": document,
+                "metadata": metadata,
+                "vector_score": max(0.0, 1.0 - float(distance)),
+            }
+            for item_id, document, metadata, distance in zip(
+                (result.get("ids") or [[]])[0],
+                (result.get("documents") or [[]])[0],
+                (result.get("metadatas") or [[]])[0],
+                (result.get("distances") or [[]])[0],
+                strict=True,
+            )
+        ]
 
     def delete_generation(self, generation_id: str) -> None:
         if self.collection.count():

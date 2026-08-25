@@ -100,7 +100,7 @@ def build_mcp(
     default_identity: McpIdentity | None = None,
     knowledge_search: KnowledgeSearch | None = None,
 ):
-    knowledge_search = knowledge_search or KnowledgeSearch(engine)
+    knowledge_search = knowledge_search or KnowledgeSearch(engine, settings)
     mcp = FastMCP(
         "CodeAtlas",
         instructions=(
@@ -219,6 +219,26 @@ def build_mcp(
         """Read one published Wiki page with its provenance sources."""
         identity("read")
         return knowledge_search.get_wiki_page(path)
+
+    @mcp.tool()
+    def search_knowledge(
+        query: str,
+        source_types: list[str] | None = None,
+        repository: str | None = None,
+        collection: str | None = None,
+        top_k: int = 10,
+    ) -> list[dict]:
+        """Search code, structured documents and Wiki pages in one cited result set."""
+        current = identity("search")
+        if repository and current.repository_ids and repository not in current.repository_ids:
+            raise PermissionError("repository is outside this token scope")
+        return retriever.search_knowledge(
+            query,
+            repository_ids=[repository] if repository else list(current.repository_ids),
+            collection_ids=[collection] if collection else None,
+            source_types=source_types,
+            limit=top_k,
+        )
 
     raw_app = mcp.streamable_http_app()
     return mcp, raw_app, TokenAuthMiddleware(raw_app, engine)

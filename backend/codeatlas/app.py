@@ -35,7 +35,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         indexer.submit(job_id)
 
     job_queue = IndexJobQueue(engine, submit_job)
-    knowledge_search = KnowledgeSearch(engine)
+    knowledge_search = KnowledgeSearch(engine, settings)
     gitlab_sync = GitLabSyncCoordinator(settings, engine, submit_job)
     github_sync = GitHubSyncCoordinator(settings, engine, submit_job)
     fastmcp, mcp_raw_app, mcp_http_app = build_mcp(

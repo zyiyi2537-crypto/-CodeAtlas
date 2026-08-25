@@ -143,7 +143,7 @@ def test_knowledge_search_owns_document_and_wiki_results(application, admin) -> 
         session.add(wiki)
         session.commit()
 
-    search = KnowledgeSearch(application.state.engine)
+    search = KnowledgeSearch(application.state.engine, application.state.settings)
     documents = search.search_documents("worker submission", [collection_id])
     pages = search.search_wiki("duplicate active")
 

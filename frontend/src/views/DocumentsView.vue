@@ -69,7 +69,7 @@ function onFileChange(event: Event) {
         <button class="command-button" type="button" @click="showCreate = true"><FolderPlus :size="16" />新建文档集</button>
       </div>
     </section>
-    <input ref="fileInput" class="visually-hidden" type="file" accept=".md,.markdown,.txt,.csv,.docx,.xlsx" @change="onFileChange" />
+    <input ref="fileInput" class="visually-hidden" type="file" accept=".md,.markdown,.txt,.csv,.docx,.xlsx,.pdf,.pptx" @change="onFileChange" />
     <div v-if="error" class="error-banner">{{ error }} <button class="icon-button" type="button" aria-label="关闭" @click="error = ''"><X :size="15" /></button></div>
     <section class="data-section">
       <div class="section-heading"><h2>文档集</h2><span>原文件保留，抽取内容用于检索</span></div>
@@ -81,11 +81,11 @@ function onFileChange(event: Event) {
       <EmptyState v-else title="暂无文档集" description="先建立一个文档集，再上传项目开发文档。" />
     </section>
     <section v-if="selectedCollection" class="data-section">
-      <div class="section-heading"><h2>已上传文档</h2><span>支持 Markdown、TXT、CSV、DOCX、XLSX</span></div>
+      <div class="section-heading"><h2>已上传文档</h2><span>支持 Markdown、TXT、CSV、DOCX、XLSX、文本 PDF、PPTX</span></div>
       <div v-if="documents.data.value?.length" class="gitlab-project-list">
         <div v-for="document in documents.data.value" :key="document.id" class="gitlab-project-row"><FileText :size="18" /><span><strong>{{ document.title }}</strong><small>版本 {{ document.version }} · {{ document.chunk_count }} 个检索片段</small></span><span>{{ document.status }}</span></div>
       </div>
-      <EmptyState v-else title="文档集为空" description="上传 Word、Excel、Markdown 或文本文件后会自动抽取并建立检索片段。" />
+      <EmptyState v-else title="文档集为空" description="上传 Word、Excel、文本 PDF、PPT 或 Markdown 后，会按标题、表格、页、工作表和幻灯片结构建立语义索引。" />
     </section>
     <div v-if="showCreate" class="preview-backdrop" role="presentation" @click.self="showCreate = false"><section class="form-dialog" role="dialog" aria-modal="true"><header class="dialog-header"><h2>新建文档集</h2><button class="icon-button" type="button" aria-label="关闭" @click="showCreate = false"><X :size="18" /></button></header><form class="stack-form" @submit.prevent="createCollection.mutate()"><label><span>名称</span><input v-model="collectionName" required /></label><label><span>描述</span><textarea v-model="collectionDescription" rows="3" /></label><div class="form-actions"><button class="secondary-button" type="button" @click="showCreate = false">取消</button><button class="command-button" type="submit">创建</button></div></form></section></div>
   </div>

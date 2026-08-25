@@ -10,7 +10,7 @@ from .settings import Settings
 
 _SYSTEM_PROMPT = (
     "You are CodeAtlas, an assistant that answers questions strictly from the "
-    "provided code evidence. Rules:\n"
+    "provided code, document and Wiki evidence. Rules:\n"
     "1. Answer in the same language the user asked in.\n"
     "2. Cite evidence inline as [1], [2], ... matching the numbered snippets.\n"
     "3. If the evidence is insufficient, say so plainly instead of guessing.\n"
@@ -60,8 +60,12 @@ class ChatService:
         if not question or len(question) > 1000:
             raise ValueError("question must contain between 1 and 1000 characters")
 
-        evidence = self.retriever.search(
-            question, user, repository_ids=repository_ids, limit=8
+        evidence = self.retriever.search_knowledge(
+            question,
+            user,
+            repository_ids=repository_ids,
+            source_types=["code", "document", "wiki"],
+            limit=8,
         )
         messages = self._build_messages(question, evidence, history or [])
         answer = self._complete(messages)
@@ -76,18 +80,19 @@ class ChatService:
         context_parts: list[str] = []
         budget = _MAX_CONTEXT_CHARS
         for index, item in enumerate(evidence, start=1):
-            meta = item["metadata"]
-            snippet = str(item["document"])
+            source_type = item.get("source_type", "code")
+            snippet = str(item.get("content") or item.get("snippet") or "")
             block = (
-                f"[{index}] repo={meta['repo']} path={meta['path']} "
-                f"lines={meta['start_line']}-{meta['end_line']} "
-                f"symbol={meta.get('symbol') or '-'}\n{snippet}"
+                f"[{index}] source={source_type} title={item.get('title', '')} "
+                f"section={item.get('section', '')} path={item.get('path', '')} "
+                f"page={item.get('page') or '-'} lines="
+                f"{item.get('start_line', 0)}-{item.get('end_line', 0)}\n{snippet}"
             )
             if len(block) > budget:
                 break
             context_parts.append(block)
             budget -= len(block)
-        context = "\n\n".join(context_parts) or "(no matching code found)"
+        context = "\n\n".join(context_parts) or "(no matching evidence found)"
 
         messages: list[dict] = [{"role": "system", "content": _SYSTEM_PROMPT}]
         for turn in history[-_MAX_HISTORY:]:
@@ -97,7 +102,7 @@ class ChatService:
                 messages.append({"role": role, "content": content})
         messages.append({
             "role": "user",
-            "content": f"Code evidence:\n{context}\n\nQuestion: {question}",
+            "content": f"Knowledge evidence:\n{context}\n\nQuestion: {question}",
         })
         return messages
 
@@ -124,11 +129,15 @@ class ChatService:
 
     @staticmethod
     def _citation(item: dict) -> dict:
-        meta = item["metadata"]
         return {
-            "repo": meta["repo"],
-            "path": meta["path"],
-            "symbol": meta.get("symbol") or "",
-            "start_line": meta["start_line"],
-            "end_line": meta["end_line"],
+            "source_type": item.get("source_type", "code"),
+            "source_id": item.get("source_id", item.get("repo", "")),
+            "title": item.get("title", item.get("path", "")),
+            "section": item.get("section", item.get("symbol", "")),
+            "page": item.get("page"),
+            "repo": item.get("repo", ""),
+            "path": item.get("path", ""),
+            "symbol": item.get("symbol", ""),
+            "start_line": item.get("start_line", 0),
+            "end_line": item.get("end_line", 0),
         }

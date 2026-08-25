@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session
 
+from codeatlas.chat import ChatService
 from codeatlas.models import Repository, User
 from tests.conftest import login_admin
 
@@ -86,6 +87,46 @@ def test_chat_answers_with_citations(
     payload = response.json()
     assert "main" in payload["answer"]
     assert payload["citations"][0]["path"] == "src/app.py"
+
+
+def test_chat_uses_unified_document_and_wiki_evidence(settings, monkeypatch) -> None:
+    class UnifiedRetriever:
+        def search_knowledge(self, *_args, **_kwargs):
+            return [
+                {
+                    "source_type": "document",
+                    "source_id": "doc-1",
+                    "title": "Deployment guide",
+                    "section": "Nginx",
+                    "page": 3,
+                    "content": "Configure the reverse proxy.",
+                    "score": 0.9,
+                }
+            ]
+
+    provider = type(
+        "Provider",
+        (),
+        {"base_url": "https://llm.example/v1", "api_key": "test", "model": "test"},
+    )()
+    service = ChatService(settings, UnifiedRetriever(), provider)
+    monkeypatch.setattr(service, "_complete", lambda messages: messages[-1]["content"])
+
+    result = service.ask("怎么部署？", None)
+
+    assert "source=document" in result["answer"]
+    assert result["citations"][0] == {
+        "source_type": "document",
+        "source_id": "doc-1",
+        "title": "Deployment guide",
+        "section": "Nginx",
+        "page": 3,
+        "path": "",
+        "repo": "",
+        "symbol": "",
+        "start_line": 0,
+        "end_line": 0,
+    }
 
 
 def test_repository_tree_lists_entries(

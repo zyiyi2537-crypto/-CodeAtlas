@@ -1,4 +1,11 @@
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+id_rsa*
+id_ed25519*
 .venv/
 __pycache__/
 .pytest_cache/

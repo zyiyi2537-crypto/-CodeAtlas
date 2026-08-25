@@ -78,6 +78,7 @@ class IndexCoordinator:
         generation_id = ""
         checkout_path = None
         embedding_settings = self.settings
+        embedding_namespace = "default"
         try:
             with Session(self.engine) as session:
                 job = session.get(IndexJob, job_id)
@@ -102,6 +103,7 @@ class IndexCoordinator:
                 ).first()
                 if embedding_profile:
                     embedding_settings = settings_for_profile(self.settings, embedding_profile)
+                    embedding_namespace = embedding_profile.id
 
             self._progress(job_id, 10, "Synchronizing repository")
             root, commit = sync_repository(
@@ -131,7 +133,7 @@ class IndexCoordinator:
                 raise ValueError("repository contains no supported source files")
 
             self._progress(job_id, 45, f"Embedding {len(chunks)} code chunks")
-            store = VectorStore(embedding_settings)
+            store = VectorStore(embedding_settings, namespace=embedding_namespace)
             store.add_generation(chunks, EmbeddingClient(embedding_settings))
             self._progress(job_id, 80, "Activating search index")
             self._activate_generation(repository_id, generation_id, commit, str(root), chunks)
@@ -168,7 +170,9 @@ class IndexCoordinator:
                 session.commit()
         except Exception as exc:
             if generation_id:
-                self._discard_generation(generation_id)
+                self._discard_generation(
+                    generation_id, embedding_settings, embedding_namespace
+                )
             if checkout_path is not None:
                 try:
                     remove_checkout(self.settings, repository_id, checkout_path)
@@ -215,9 +219,16 @@ class IndexCoordinator:
             ])
             session.commit()
 
-    def _discard_generation(self, generation_id: str) -> None:
+    def _discard_generation(
+        self,
+        generation_id: str,
+        embedding_settings: Settings,
+        embedding_namespace: str,
+    ) -> None:
         try:
-            VectorStore(self.settings).delete_generation(generation_id)
+            VectorStore(
+                embedding_settings, namespace=embedding_namespace
+            ).delete_generation(generation_id)
         except Exception:
             pass
         with Session(self.engine) as session:

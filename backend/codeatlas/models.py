@@ -109,6 +109,8 @@ class DocumentChunkRecord(SQLModel, table=True):
     title: str = Field(max_length=300)
     section: str = Field(default="", max_length=500)
     page: int | None = None
+    structure_type: str = Field(default="section", index=True, max_length=50)
+    metadata_json: str = Field(default="{}", sa_column=Column(Text, nullable=False))
     content: str = Field(sa_column=Column(Text, nullable=False))
 
 
@@ -132,6 +134,7 @@ class EmbeddingProfile(SQLModel, table=True):
     dimension: int
     credential_ref: str = Field(max_length=200)
     backend: str = Field(default="chroma", max_length=30)
+    provider: str = Field(default="openai", max_length=40)
     is_active: bool = Field(default=False, index=True)
     created_by: str = Field(foreign_key="user.id", max_length=32)
     created_at: datetime = Field(default_factory=utc_now)

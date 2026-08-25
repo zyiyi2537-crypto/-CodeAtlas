@@ -139,6 +139,7 @@ async function ask(question?: string) {
 }
 
 function openCitation(citation: ChatCitation) {
+  if (citation.source_type !== 'code') return
   previewResult.value = {
     repo: citation.repo,
     generation_id: '',
@@ -223,16 +224,24 @@ function openModelSettings() {
             <span class="citation-label">引用</span>
             <button
               v-for="(citation, citationIndex) in message.citations"
-              :key="`${citation.path}-${citation.start_line}`"
+              :key="`${citation.source_type}-${citation.source_id}-${citation.section}-${citation.page}-${citationIndex}`"
               class="citation-chip"
               type="button"
+              :disabled="citation.source_type !== 'code'"
               @click="openCitation(citation)"
             >
               <FileCode :size="14" />
               <span>
                 [{{ citationIndex + 1 }}]
-                {{ repositoryMap.get(citation.repo)?.name ?? citation.repo }}/{{ citation.path }}
-                L{{ citation.start_line }}–{{ citation.end_line }}
+                <template v-if="citation.source_type === 'code'">
+                  {{ repositoryMap.get(citation.repo)?.name ?? citation.repo }}/{{ citation.path }}
+                  L{{ citation.start_line }}–{{ citation.end_line }}
+                </template>
+                <template v-else>
+                  {{ citation.source_type === 'wiki' ? 'Wiki' : '文档' }} · {{ citation.title }}
+                  <span v-if="citation.section"> · {{ citation.section }}</span>
+                  <span v-if="citation.page"> · 第 {{ citation.page }} 页</span>
+                </template>
               </span>
             </button>
           </div>

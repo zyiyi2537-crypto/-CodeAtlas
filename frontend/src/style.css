@@ -900,6 +900,19 @@ textarea:focus {
   font-size: 12px;
 }
 
+.ssh-public-key-field {
+  width: 100%;
+  padding: 10px;
+  margin-bottom: 10px;
+  overflow-x: auto;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .live-indicator {
   color: var(--pine-strong);
 }

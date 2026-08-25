@@ -43,7 +43,7 @@ flowchart LR
 Backend:
 
 ```powershell
-cd D:\agent\CodeAtlas\backend
+cd <repo-root>\backend
 uv sync --python 3.11 --extra dev
 $env:CODEATLAS_DATABASE_URL = "mysql+pymysql://codeatlas:YOUR_PASSWORD@127.0.0.1:3306/codeatlas?charset=utf8mb4"
 uv run alembic upgrade head
@@ -61,11 +61,11 @@ temporary `codeatlas_test_*` databases.
 Frontend and blog:
 
 ```powershell
-cd D:\agent\CodeAtlas\frontend
+cd <repo-root>\frontend
 pnpm install
 pnpm dev
 
-cd D:\agent\CodeAtlas\blog
+cd <repo-root>\blog
 pnpm install
 pnpm dev
 ```
@@ -118,6 +118,28 @@ Streamable HTTP is exposed at `/mcp` and requires an API Token:
 For local stdio, set `CODEATLAS_MCP_TOKEN` and run `codeatlas-mcp`. Available
 tools are `list_repositories`, `search_code`, `grep_code`, `get_file`,
 `find_references`, and `index_status`.
+
+## Unified structured RAG
+
+Project documents support Markdown, TXT, CSV, DOCX, XLSX, text PDFs and PPTX.
+Chunking is structure-first and semantics-assisted: Word uses heading hierarchy,
+paragraphs and tables; Excel uses sheets, headers and row groups; PDF uses pages
+and layout text blocks; PowerPoint uses slide titles, bodies, tables and notes;
+Wiki uses the Markdown heading tree. Only oversized structural units fall back to
+paragraph or sentence boundaries. Embedding distance never decides chunk borders.
+
+Code, document and Wiki chunks use the active Embedding Profile and are written
+to Chroma collections isolated by profile and vector dimension. Unified cited
+retrieval is available through `/api/v1/knowledge/search` and the MCP
+`search_knowledge` tool. Image-only PDF pages are marked `ocr_required` and are
+not embedded until an OCR pipeline supplies extracted content.
+
+Embedding profiles support both OpenAI-compatible `/embeddings` and Tencent
+TokenHub `/embeddings/multimodal`. For Kinfra use the base URL
+`https://tokenhub.tencentmaas.com/v1`, model `kinfra-vl-embedding-2b`, and a
+credential reference such as `tencent-kinfra`; keep the full API key only in
+the server variable `CODEATLAS_CREDENTIAL_TENCENT_KINFRA`. Probe the returned
+dimension before saving; activation validates it again before reindexing.
 
 ## Deployment
 

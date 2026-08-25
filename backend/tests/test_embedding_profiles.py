@@ -44,6 +44,9 @@ def test_admin_can_activate_embedding_profile_and_queue_reindex(
         },
     )
     assert created.status_code == 201
+    monkeypatch.setattr(
+        "codeatlas.api.EmbeddingClient.probe_dimension", lambda _self: 128
+    )
     activated = client.post(
         f"/api/v1/embedding-profiles/{created.json()['id']}/activate",
         headers={"X-CSRF-Token": csrf},
@@ -89,3 +92,87 @@ def test_milvus_backend_is_rejected_until_implemented(client: TestClient, admin)
         },
     )
     assert response.status_code == 422
+
+
+def test_admin_can_create_tencent_multimodal_profile(
+    client: TestClient, admin, monkeypatch
+) -> None:
+    monkeypatch.setenv("CODEATLAS_CREDENTIAL_TENCENT_KINFRA", "server-only-key")
+    csrf = login_admin(client)
+
+    response = client.post(
+        "/api/v1/embedding-profiles",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "name": "tencent-kinfra",
+            "base_url": "https://tokenhub.tencentmaas.com/v1",
+            "model": "kinfra-vl-embedding-2b",
+            "dimension": 2048,
+            "credential_ref": "tencent-kinfra",
+            "provider": "tencent_multimodal",
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["provider"] == "tencent_multimodal"
+
+
+def test_admin_can_probe_tencent_embedding_dimension(
+    client: TestClient, admin, monkeypatch
+) -> None:
+    monkeypatch.setenv("CODEATLAS_CREDENTIAL_TENCENT_KINFRA", "server-only-key")
+    csrf = login_admin(client)
+
+    class ProbeClient:
+        def __init__(self, settings):
+            assert settings.embedding_mode == "tencent_multimodal"
+
+        def probe_dimension(self):
+            return 2048
+
+    monkeypatch.setattr("codeatlas.api.EmbeddingClient", ProbeClient)
+
+    response = client.post(
+        "/api/v1/embedding-profiles/probe",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "base_url": "https://tokenhub.tencentmaas.com/v1",
+            "model": "kinfra-vl-embedding-2b",
+            "credential_ref": "tencent-kinfra",
+            "provider": "tencent_multimodal",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"dimension": 2048}
+
+
+def test_activation_probes_dimension_before_creating_collection(
+    client: TestClient, admin, monkeypatch
+) -> None:
+    monkeypatch.setenv("CODEATLAS_CREDENTIAL_TENCENT_KINFRA", "server-only-key")
+    csrf = login_admin(client)
+    created = client.post(
+        "/api/v1/embedding-profiles",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "name": "wrong-dimension",
+            "base_url": "https://tokenhub.tencentmaas.com/v1",
+            "model": "kinfra-vl-embedding-2b",
+            "dimension": 1024,
+            "credential_ref": "tencent-kinfra",
+            "provider": "tencent_multimodal",
+        },
+    )
+
+    monkeypatch.setattr(
+        "codeatlas.api.EmbeddingClient.probe_dimension", lambda _self: 2048
+    )
+    response = client.post(
+        f"/api/v1/embedding-profiles/{created.json()['id']}/activate",
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    assert response.status_code == 422
+    assert "configured dimension 1024" in response.text
+    assert "provider returned 2048" in response.text

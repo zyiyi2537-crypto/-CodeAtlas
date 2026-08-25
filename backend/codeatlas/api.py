@@ -5,9 +5,11 @@ import os
 import threading
 import time
 from collections import defaultdict, deque
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 
+import httpx
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func
@@ -22,8 +24,9 @@ from .auth import (
     resolve_identity,
 )
 from .chat import ChatService, ChatUnavailableError
-from .documents import chunk_document, extract_text
+from .documents import chunk_document, extract_structured_blocks
 from .embeddings import (
+    EmbeddingClient,
     embedding_credential_name,
     resolve_embedding_api_key,
     settings_for_profile,
@@ -31,6 +34,7 @@ from .embeddings import (
 from .github import generate_deploy_key, repository_identity, resolve_deploy_key
 from .gitlab import GitLabClient, GitLabClientError
 from .job_queue import ActiveIndexJobError, JobRequest
+from .knowledge_search import KnowledgeSearch
 from .llm_config import (
     LlmProviderError,
     decrypt_api_key,
@@ -140,6 +144,15 @@ class DocumentSearchRequest(BaseModel):
     collection_ids: list[str] = Field(default_factory=list, max_length=20)
 
 
+class KnowledgeSearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=500)
+    source_types: list[str] = Field(
+        default_factory=lambda: ["code", "document", "wiki"], max_length=3
+    )
+    collection_ids: list[str] = Field(default_factory=list, max_length=20)
+    repository_ids: list[str] = Field(default_factory=list, max_length=20)
+
+
 class WikiPageCreate(BaseModel):
     path: str = Field(min_length=1, max_length=1000)
     title: str = Field(min_length=1, max_length=300)
@@ -158,6 +171,14 @@ class EmbeddingProfileCreate(BaseModel):
     dimension: int = Field(ge=64, le=4096)
     credential_ref: str = Field(min_length=1, max_length=200)
     backend: str = "chroma"
+    provider: str = "openai"
+
+
+class EmbeddingProfileProbe(BaseModel):
+    base_url: str = Field(min_length=8, max_length=500)
+    model: str = Field(min_length=1, max_length=200)
+    credential_ref: str = Field(min_length=1, max_length=200)
+    provider: str = "openai"
 
 
 class SearchRequest(BaseModel):
@@ -528,7 +549,7 @@ async def upload_document(collection_id: str, request: Request):
         if len(content) > 20 * 1024 * 1024:
             raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "document is too large")
         try:
-            text = extract_text(filename, content)
+            blocks = extract_structured_blocks(filename, content)
         except ValueError as exc:
             raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, str(exc)) from exc
         title = str(form.get("title") or Path(filename).stem)
@@ -538,6 +559,11 @@ async def upload_document(collection_id: str, request: Request):
             title=title[:300],
             original_filename=filename[:500],
             mime_type=content_type or "application/octet-stream",
+            status=(
+                "ocr_required"
+                if blocks and all(block.kind == "ocr-required" for block in blocks)
+                else "indexed"
+            ),
             source_path="",
             sha256=__import__("hashlib").sha256(content).hexdigest(),
             created_by=identity.user.id,
@@ -547,10 +573,26 @@ async def upload_document(collection_id: str, request: Request):
         raw_path = document_path / filename
         raw_path.write_bytes(content)
         document.source_path = str(raw_path)
-        chunks = chunk_document(document.title, document.id, collection.id, text)
+        chunks = chunk_document(
+            document.title,
+            document.id,
+            collection.id,
+            blocks=blocks,
+        )
         session.add(document)
         session.add_all(chunks)
         session.commit()
+        if chunks:
+            try:
+                request.app.state.knowledge_search.index_document(chunks)
+            except Exception as exc:
+                document.status = "index_failed"
+                session.add(document)
+                session.commit()
+                raise HTTPException(
+                    status.HTTP_502_BAD_GATEWAY,
+                    f"document embedding failed: {exc}",
+                ) from exc
         return {
             "id": document.id,
             "title": document.title,
@@ -566,6 +608,25 @@ def search_documents(payload: DocumentSearchRequest, request: Request):
         require_identity(request, session)
     return request.app.state.knowledge_search.search_documents(
         payload.query, payload.collection_ids
+    )
+
+
+@router.post("/knowledge/search")
+def search_knowledge(payload: KnowledgeSearchRequest, request: Request):
+    with database(request) as session:
+        identity = require_identity(request, session)
+    allowed = {"code", "document", "wiki"}
+    if not payload.source_types or not set(payload.source_types).issubset(allowed):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "source_types must contain code, document and/or wiki",
+        )
+    return request.app.state.retriever.search_knowledge(
+        payload.query,
+        identity.user,
+        repository_ids=payload.repository_ids,
+        collection_ids=payload.collection_ids,
+        source_types=payload.source_types,
     )
 
 
@@ -591,6 +652,13 @@ def create_wiki_page(payload: WikiPageCreate, request: Request):
         session.add(page)
         session.commit()
         session.refresh(page)
+        try:
+            request.app.state.knowledge_search.index_wiki(page)
+        except Exception as exc:
+            raise HTTPException(
+                status.HTTP_502_BAD_GATEWAY,
+                f"wiki embedding failed: {exc}",
+            ) from exc
         return {
             "id": page.id,
             "path": page.path,
@@ -620,6 +688,7 @@ def list_embedding_profiles(request: Request):
                 "credential_configured": bool(resolve_embedding_api_key(item.credential_ref)),
                 "credential_env": embedding_credential_name(item.credential_ref),
                 "backend": item.backend,
+                "provider": item.provider,
                 "is_active": item.is_active,
             }
             for item in session.exec(select(EmbeddingProfile)).all()
@@ -633,6 +702,11 @@ def create_embedding_profile(payload: EmbeddingProfileCreate, request: Request):
         require_csrf(request, identity)
         if payload.backend != "chroma":
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Only Chroma is implemented")
+        if payload.provider not in {"openai", "tencent_multimodal"}:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "provider must be openai or tencent_multimodal",
+            )
         try:
             credential_ref = validate_credential_ref(payload.credential_ref)
         except ValueError as exc:
@@ -641,6 +715,7 @@ def create_embedding_profile(payload: EmbeddingProfileCreate, request: Request):
             name=payload.name.strip(), base_url=payload.base_url.strip().rstrip("/"),
             model=payload.model.strip(), dimension=payload.dimension,
             credential_ref=credential_ref, backend=payload.backend,
+            provider=payload.provider,
             created_by=identity.user.id,
         )
         session.add(profile)
@@ -653,8 +728,37 @@ def create_embedding_profile(payload: EmbeddingProfileCreate, request: Request):
             "credential_configured": bool(resolve_embedding_api_key(profile.credential_ref)),
             "credential_env": embedding_credential_name(profile.credential_ref),
             "backend": profile.backend,
+            "provider": profile.provider,
             "is_active": profile.is_active,
         }
+
+
+@router.post("/embedding-profiles/probe")
+def probe_embedding_profile(payload: EmbeddingProfileProbe, request: Request):
+    with database(request) as session:
+        identity = require_admin(request, session)
+        require_csrf(request, identity)
+    try:
+        credential_ref = validate_credential_ref(payload.credential_ref)
+        api_key = resolve_embedding_api_key(credential_ref)
+        if not api_key:
+            raise ValueError(
+                "Embedding credential is not configured on the server: "
+                f"{embedding_credential_name(credential_ref)}"
+            )
+        if payload.provider not in {"openai", "tencent_multimodal"}:
+            raise ValueError("provider must be openai or tencent_multimodal")
+        probe_settings = replace(
+            request.app.state.settings,
+            embedding_mode=payload.provider,
+            embedding_base_url=payload.base_url.strip().rstrip("/"),
+            embedding_api_key=api_key,
+            embedding_model=payload.model.strip(),
+        )
+        dimension = EmbeddingClient(probe_settings).probe_dimension()
+    except (ValueError, httpx.HTTPError) as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+    return {"dimension": dimension}
 
 
 @router.post("/embedding-profiles/{profile_id}/activate")
@@ -675,8 +779,14 @@ def activate_embedding_profile(profile_id: str, request: Request):
             )
         try:
             profile_settings = settings_for_profile(request.app.state.settings, profile)
-            VectorStore(profile_settings)
-        except ValueError as exc:
+            returned_dimension = EmbeddingClient(profile_settings).probe_dimension()
+            if returned_dimension != profile.dimension:
+                raise ValueError(
+                    f"configured dimension {profile.dimension}, "
+                    f"provider returned {returned_dimension}"
+                )
+            VectorStore(profile_settings, namespace=profile.id)
+        except (ValueError, httpx.HTTPError) as exc:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
         for item in session.exec(select(EmbeddingProfile).where(EmbeddingProfile.is_active)).all():
             item.is_active = False
@@ -718,10 +828,15 @@ def activate_embedding_profile(profile_id: str, request: Request):
             "credential_ref": mask_credential_ref(profile.credential_ref),
             "credential_configured": bool(resolve_embedding_api_key(profile.credential_ref)),
             "credential_env": embedding_credential_name(profile.credential_ref),
-            "backend": profile.backend, "is_active": profile.is_active,
+            "backend": profile.backend, "provider": profile.provider,
+            "is_active": profile.is_active,
             "queued_jobs": len(job_ids),
         }
     request.app.state.job_queue.submit(job_ids)
+    request.app.state.knowledge_search = KnowledgeSearch(
+        request.app.state.engine, request.app.state.settings
+    )
+    response["knowledge_rebuild"] = request.app.state.knowledge_search.rebuild_all()
     return response
 
 

@@ -113,6 +113,11 @@ export interface FilePreview {
 }
 
 export interface ChatCitation {
+  source_type: 'code' | 'document' | 'wiki'
+  source_id: string
+  title: string
+  section: string
+  page: number | null
   repo: string
   path: string
   symbol: string

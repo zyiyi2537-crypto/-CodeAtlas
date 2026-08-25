@@ -39,7 +39,7 @@ flowchart LR
 后端：
 
 ```powershell
-cd D:\agent\CodeAtlas\backend
+cd <项目根目录>\backend
 uv sync --python 3.11 --extra dev
 $env:CODEATLAS_DATABASE_URL = "mysql+pymysql://codeatlas:YOUR_PASSWORD@127.0.0.1:3306/codeatlas?charset=utf8mb4"
 uv run alembic upgrade head
@@ -54,11 +54,11 @@ uv run uvicorn codeatlas.app:create_app --factory --host 127.0.0.1 --port 8010
 前端与博客：
 
 ```powershell
-cd D:\agent\CodeAtlas\frontend
+cd <项目根目录>\frontend
 pnpm install
 pnpm dev
 
-cd D:\agent\CodeAtlas\blog
+cd <项目根目录>\blog
 pnpm install
 pnpm dev
 ```
@@ -104,6 +104,14 @@ Streamable HTTP MCP 暴露于 `/mcp`，并要求提供 API Token：
 ```
 
 如需使用本地 stdio，请设置 `CODEATLAS_MCP_TOKEN` 并运行 `codeatlas-mcp`。可用工具包括 `list_repositories`、`search_code`、`grep_code`、`get_file`、`find_references` 和 `index_status`。
+
+## 统一结构化 RAG
+
+项目文档支持 Markdown、TXT、CSV、DOCX、XLSX、文本型 PDF 与 PPTX。切块遵循“结构优先、语义辅助”：Word 按标题层级、段落和表格；Excel 按工作表、表头和行组；PDF 按页和版面文本块；PPT 按幻灯片标题、正文、表格和备注；Wiki 按 Markdown 标题树。只有结构单元超过限制时才在段落或句子边界继续拆分，Embedding 不参与决定切块位置。
+
+代码、文档和 Wiki 使用当前激活的 Embedding Profile 写入按 Profile 与维度隔离的 Chroma Collection，并通过 `/api/v1/knowledge/search` 或 MCP `search_knowledge` 返回统一、可引用的结果。扫描型 PDF 会标记为 `ocr_required`，不会将空页或占位提示写入向量库；需要另行配置 OCR 处理链路后再重建索引。
+
+Embedding Profile 支持 OpenAI-compatible `/embeddings` 和腾讯 TokenHub `/embeddings/multimodal` 两种协议。腾讯 Kinfra 配置建议使用 Base URL `https://tokenhub.tencentmaas.com/v1`、模型 `kinfra-vl-embedding-2b` 和凭据引用 `tencent-kinfra`；完整 API Key 只放入服务器环境变量 `CODEATLAS_CREDENTIAL_TENCENT_KINFRA`。保存前可调用“探测维度”，激活时后端也会再次校验真实返回维度。
 
 > 生产 Token 不应通过公网 HTTP 传输。正式接入应在有效 TLS 证书和 HTTPS 监听器配置完成后，直接使用 `https://` MCP 地址。
 
