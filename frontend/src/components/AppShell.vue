@@ -36,6 +36,7 @@ const navigation = computed(() => {
     { to: '/chat', label: '代码问答', icon: MessageSquareText },
     { to: '/browse', label: '代码浏览', icon: FolderTree },
     { to: '/documents', label: '项目文档', icon: FileText },
+    { to: '/external-sources', label: '外部知识源', icon: Cloud, admin: true },
     { to: '/overview', label: '概览', icon: Gauge },
     { to: '/jobs', label: '索引任务', icon: Boxes },
     { to: '/repositories', label: '仓库', icon: Database, admin: true },
@@ -58,7 +59,7 @@ const navigationGroups = computed(() => {
     {
       letter: 'B',
       label: '知识库',
-      paths: ['/documents'],
+      paths: ['/documents', '/external-sources'],
     },
     {
       letter: 'C',

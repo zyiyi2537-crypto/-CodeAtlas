@@ -4,9 +4,9 @@ from collections.abc import Iterator
 
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.pool import NullPool
-from sqlmodel import Session, SQLModel, create_engine, select
+from sqlmodel import Session, SQLModel, col, create_engine, select
 
-from .models import IndexJob
+from .models import ExternalSource, IndexJob
 from .settings import Settings
 
 
@@ -36,6 +36,15 @@ def initialize_database(settings: Settings, engine) -> None:
             job.progress = 0
             job.message = "Recovered after service restart"
             session.add(job)
+        external_sources = session.exec(
+            select(ExternalSource).where(
+                col(ExternalSource.sync_status).in_(("queued", "syncing"))
+            )
+        ).all()
+        for source in external_sources:
+            source.sync_status = "queued"
+            source.last_error = "Recovered after service restart"
+            session.add(source)
         session.commit()
 
 

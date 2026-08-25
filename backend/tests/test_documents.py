@@ -6,7 +6,9 @@ from pathlib import Path
 import pymupdf
 from fastapi.testclient import TestClient
 from pptx import Presentation
+from sqlmodel import Session
 
+from codeatlas.models import Document, DocumentChunkRecord, DocumentCollection
 from tests.conftest import login_admin
 
 
@@ -65,6 +67,64 @@ def test_document_upload_rejects_unsupported_type(client: TestClient, admin) -> 
         files={"file": ("bad.exe", b"MZ", "application/octet-stream")},
     )
     assert response.status_code == 415
+
+
+def test_index_failed_document_is_not_searchable(application, admin, monkeypatch) -> None:
+    with Session(application.state.engine) as session:
+        collection = DocumentCollection(
+            name="Failed documents", description="", created_by=admin.id
+        )
+        session.add(collection)
+        session.flush()
+        collection_id = collection.id
+        document = Document(
+            collection_id=collection.id,
+            title="Failed deployment",
+            original_filename="failed.md",
+            mime_type="text/markdown",
+            status="index_failed",
+            source_path="",
+            sha256="0" * 64,
+            created_by=admin.id,
+        )
+        session.add(document)
+        session.flush()
+        document_id = document.id
+        session.add(
+            DocumentChunkRecord(
+                id="failed-document-chunk",
+                document_id=document.id,
+                collection_id=collection.id,
+                title=document.title,
+                section="Secrets",
+                content="This failed document must not appear in retrieval.",
+            )
+        )
+        session.commit()
+
+    monkeypatch.setattr(
+        application.state.knowledge_search.vector_store,
+        "search_knowledge",
+        lambda *_args, **_kwargs: [
+            {
+                "id": "failed-document-chunk",
+                "document": "This failed document must not appear in retrieval.",
+                "metadata": {
+                    "source_type": "document",
+                    "source_id": document_id,
+                    "collection_id": collection_id,
+                    "title": "Failed deployment",
+                    "section": "Secrets",
+                    "page": 0,
+                },
+                "vector_score": 0.99,
+            }
+        ],
+    )
+
+    results = application.state.knowledge_search.search_documents("failed document")
+
+    assert results == []
 
 
 def test_admin_can_upload_text_pdf_and_search_by_page(client: TestClient, admin) -> None:

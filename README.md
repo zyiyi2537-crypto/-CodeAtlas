@@ -141,6 +141,37 @@ credential reference such as `tencent-kinfra`; keep the full API key only in
 the server variable `CODEATLAS_CREDENTIAL_TENCENT_KINFRA`. Probe the returned
 dimension before saving; activation validates it again before reindexing.
 
+### External knowledge connectors
+
+The admin-only `External Knowledge Sources` page connects AWS S3, Tencent COS,
+Notion and Confluence to an existing document collection. Connectors perform
+scheduled scans, skip unchanged revisions, preserve original bytes and provider
+provenance, and reuse the same structure-first document parsing, MySQL truth,
+Chroma projection and cited RAG path as manual uploads.
+
+The browser accepts only an opaque `credential_ref`; it never accepts or returns
+cloud secrets. Install the corresponding JSON bundle in the protected service
+environment, for example:
+
+```env
+CODEATLAS_CREDENTIAL_AWS_DOCS='{"access_key_id":"...","secret_access_key":"..."}'
+CODEATLAS_CREDENTIAL_COS_DOCS='{"secret_id":"...","secret_key":"..."}'
+CODEATLAS_CREDENTIAL_NOTION_ENGINEERING='{"token":"..."}'
+CODEATLAS_CREDENTIAL_CONFLUENCE_ENGINEERING='{"email":"admin@example.com","api_token":"..."}'
+```
+
+Object storage supports Bucket/Prefix/Region, paginated inventory, bounded
+downloads and ETag/LastModified-based change detection. Notion uses the pinned
+official REST API and recursive block traversal; Confluence supports Cloud Basic
+Auth and Data Center bearer tokens, Space filtering and storage-format parsing.
+Private Confluence hosts must be explicitly authorized with
+`CODEATLAS_ALLOWED_EXTERNAL_HOSTS`.
+
+Current scope is scheduled read-only synchronization. Notion/Confluence search
+disappearance is not treated as deletion proof, preventing permission changes
+from deleting local knowledge. OAuth multi-tenancy, webhooks, attachments and
+object-store VersionId/DeleteMarker ingestion remain later enhancements.
+
 ## Deployment
 
 The current pre-domain deployment binds Uvicorn to `127.0.0.1:8010` and exposes

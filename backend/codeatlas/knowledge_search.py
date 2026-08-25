@@ -6,7 +6,7 @@ from sqlmodel import Session, col, select
 
 from .documents import StructuredBlock, split_structured_blocks
 from .embeddings import EmbeddingClient
-from .models import DocumentChunkRecord, EmbeddingProfile, WikiPage
+from .models import Document, DocumentChunkRecord, EmbeddingProfile, WikiPage
 from .settings import Settings
 from .vector_store import KnowledgeVectorChunk, VectorStore
 
@@ -49,7 +49,15 @@ class KnowledgeSearch:
         self, collection_ids: list[str] | tuple[str, ...] | None = None
     ) -> list[DocumentChunkRecord]:
         with Session(self.engine) as session:
+            indexed_document_ids = session.exec(
+                select(Document.id).where(Document.status == "indexed")
+            ).all()
+            if not indexed_document_ids:
+                return []
             statement = select(DocumentChunkRecord)
+            statement = statement.where(
+                col(DocumentChunkRecord.document_id).in_(indexed_document_ids)
+            )
             if collection_ids:
                 statement = statement.where(
                     col(DocumentChunkRecord.collection_id).in_(collection_ids)
@@ -60,6 +68,14 @@ class KnowledgeSearch:
         with Session(self.engine) as session:
             return list(
                 session.exec(select(WikiPage).where(WikiPage.status == "published")).all()
+            )
+
+    def _indexed_document_ids(self) -> set[str]:
+        with Session(self.engine) as session:
+            return set(
+                session.exec(
+                    select(Document.id).where(Document.status == "indexed")
+                ).all()
             )
 
     def index_document(self, chunks: list[DocumentChunkRecord]) -> None:
@@ -81,6 +97,11 @@ class KnowledgeSearch:
                         "page": chunk.page or 0,
                         "structure_type": chunk.structure_type,
                         "ordinal": int(metadata.get("ordinal", 0)),
+                        "external_provider": str(metadata.get("external_provider", "")),
+                        "external_source_id": str(metadata.get("external_source_id", "")),
+                        "external_id": str(metadata.get("external_id", "")),
+                        "source_url": str(metadata.get("source_url", "")),
+                        "external_path": str(metadata.get("external_path", "")),
                     },
                 )
             )
@@ -144,6 +165,7 @@ class KnowledgeSearch:
         lexical: dict[str, dict] = {}
         if "document" in wanted:
             for row in self._document_rows(collection_ids):
+                metadata = json.loads(row.metadata_json or "{}")
                 score = self._lexical_score(terms, f"{row.title} {row.section} {row.content}")
                 if score:
                     lexical[row.id] = {
@@ -155,6 +177,11 @@ class KnowledgeSearch:
                         "section": row.section,
                         "page": row.page,
                         "content": row.content,
+                        "external_provider": metadata.get("external_provider", ""),
+                        "external_source_id": metadata.get("external_source_id", ""),
+                        "external_id": metadata.get("external_id", ""),
+                        "source_url": metadata.get("source_url", ""),
+                        "external_path": metadata.get("external_path", ""),
                         "lexical_score": score,
                     }
         if "wiki" in wanted:
@@ -180,6 +207,14 @@ class KnowledgeSearch:
             max(limit * 3, 20),
             list(collection_ids) if collection_ids else None,
         )
+        if "document" in wanted:
+            indexed_document_ids = self._indexed_document_ids()
+            vector = [
+                candidate
+                for candidate in vector
+                if candidate["metadata"].get("source_type") != "document"
+                or candidate["metadata"].get("source_id") in indexed_document_ids
+            ]
         pool: dict[str, dict] = dict(lexical)
         for rank, candidate in enumerate(vector, start=1):
             metadata = candidate["metadata"]
@@ -194,6 +229,11 @@ class KnowledgeSearch:
                     "section": metadata.get("section", ""),
                     "page": metadata.get("page") or None,
                     "path": metadata.get("path", ""),
+                    "external_provider": metadata.get("external_provider", ""),
+                    "external_source_id": metadata.get("external_source_id", ""),
+                    "external_id": metadata.get("external_id", ""),
+                    "source_url": metadata.get("source_url", ""),
+                    "external_path": metadata.get("external_path", ""),
                     "content": candidate["document"],
                     "lexical_score": 0,
                 },

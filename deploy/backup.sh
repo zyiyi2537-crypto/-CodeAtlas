@@ -70,6 +70,9 @@ mysqldump --defaults-extra-file="$MYSQL_CNF" \
 if [[ -d "$DATA_DIR/chroma" ]]; then
   cp -a "$DATA_DIR/chroma" "$STAGE/chroma"
 fi
+if [[ -d "$DATA_DIR/documents" ]]; then
+  cp -a "$DATA_DIR/documents" "$STAGE/documents"
+fi
 if [[ -d "$APP_DIR/blog/src/content" ]]; then
   install -d "$STAGE/blog"
   cp -a "$APP_DIR/blog/src/content" "$STAGE/blog/content"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from threading import Event, Thread
 
 from fastapi import FastAPI
@@ -10,13 +11,14 @@ from sqlmodel import Session, select
 
 from .api import router
 from .database import create_database, initialize_database
+from .external_sync import ExternalSourceSyncService
 from .github_sync import GitHubSyncCoordinator
 from .gitlab_sync import GitLabSyncCoordinator
 from .indexing import IndexCoordinator
 from .job_queue import IndexJobQueue
 from .knowledge_search import KnowledgeSearch
 from .mcp_server import build_mcp
-from .models import IndexJob
+from .models import ExternalSource, IndexJob
 from .retrieval import CodeRetriever
 from .settings import Settings
 
@@ -36,6 +38,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     job_queue = IndexJobQueue(engine, submit_job)
     knowledge_search = KnowledgeSearch(engine, settings)
+    external_sync = ExternalSourceSyncService(settings, engine, knowledge_search)
     gitlab_sync = GitLabSyncCoordinator(settings, engine, submit_job)
     github_sync = GitHubSyncCoordinator(settings, engine, submit_job)
     fastmcp, mcp_raw_app, mcp_http_app = build_mcp(
@@ -46,8 +49,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(_app: FastAPI):
         with Session(engine) as database:
             queued = database.exec(select(IndexJob).where(IndexJob.status == "queued")).all()
+            queued_external_sources = database.exec(
+                select(ExternalSource).where(ExternalSource.sync_status == "queued")
+            ).all()
         for job in queued:
             indexer.submit(job.id)
+        for source in queued_external_sources:
+            try:
+                external_sync.submit(source.id)
+            except RuntimeError:
+                pass
         stop_sync = Event()
 
         def run_source_sync() -> None:
@@ -61,6 +72,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         coordinator.check_enabled_sources()
                     except Exception:
                         logger.exception("%s source polling cycle failed", provider)
+                with Session(engine) as database:
+                    due_sources = database.exec(
+                        select(ExternalSource).where(ExternalSource.enabled)
+                    ).all()
+                now = datetime.now(UTC)
+                for source in due_sources:
+                    checked = source.last_checked_at
+                    if checked and checked.tzinfo is None:
+                        checked = checked.replace(tzinfo=UTC)
+                    if checked and (now - checked).total_seconds() < max(
+                        300, source.poll_interval_seconds
+                    ):
+                        continue
+                    try:
+                        external_sync.submit(source.id)
+                    except RuntimeError:
+                        pass
                 stop_sync.wait(60)
 
         sync_thread = Thread(target=run_source_sync, name="codeatlas-source-sync", daemon=True)
@@ -70,6 +98,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         stop_sync.set()
         sync_thread.join(timeout=5)
         indexer.shutdown()
+        external_sync.shutdown()
 
     app = FastAPI(
         title="CodeAtlas API",
@@ -84,6 +113,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.indexer = indexer
     app.state.job_queue = job_queue
     app.state.knowledge_search = knowledge_search
+    app.state.external_sync = external_sync
     app.state.gitlab_sync = gitlab_sync
     app.state.github_sync = github_sync
     app.state.fastmcp = fastmcp

@@ -140,4 +140,8 @@ class ChatService:
             "symbol": item.get("symbol", ""),
             "start_line": item.get("start_line", 0),
             "end_line": item.get("end_line", 0),
+            "external_provider": item.get("external_provider", ""),
+            "external_source_id": item.get("external_source_id", ""),
+            "external_id": item.get("external_id", ""),
+            "source_url": item.get("source_url", ""),
         }

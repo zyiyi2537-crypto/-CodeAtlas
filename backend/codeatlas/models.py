@@ -114,6 +114,47 @@ class DocumentChunkRecord(SQLModel, table=True):
     content: str = Field(sa_column=Column(Text, nullable=False))
 
 
+class ExternalSource(SQLModel, table=True):
+    """A configured external document system synchronized into a collection."""
+
+    id: str = Field(default_factory=new_id, primary_key=True, max_length=32)
+    name: str = Field(index=True, unique=True, max_length=120)
+    provider: str = Field(index=True, max_length=40)
+    collection_id: str = Field(
+        foreign_key="documentcollection.id", index=True, max_length=32
+    )
+    credential_ref: str = Field(max_length=200)
+    config_json: str = Field(default="{}", sa_column=Column(Text, nullable=False))
+    enabled: bool = Field(default=True, index=True)
+    poll_interval_seconds: int = Field(default=1800)
+    sync_status: str = Field(default="idle", index=True, max_length=30)
+    last_checked_at: datetime | None = None
+    last_error: str = Field(default="", max_length=2000)
+    last_result_json: str = Field(default="{}", sa_column=Column(Text, nullable=False))
+    created_by: str = Field(foreign_key="user.id", max_length=32)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class ExternalSourceItem(SQLModel, table=True):
+    __table_args__ = (UniqueConstraint("source_id", "external_id_hash"),)
+
+    id: str = Field(default_factory=new_id, primary_key=True, max_length=32)
+    source_id: str = Field(foreign_key="externalsource.id", index=True, max_length=32)
+    external_id: str = Field(sa_column=Column(Text, nullable=False))
+    external_id_hash: str = Field(max_length=64)
+    document_id: str | None = Field(
+        default=None, foreign_key="document.id", index=True, max_length=32
+    )
+    path: str = Field(sa_column=Column(Text, nullable=False))
+    title: str = Field(max_length=300)
+    mime_type: str = Field(default="application/octet-stream", max_length=120)
+    revision: str = Field(default="", max_length=500)
+    modified_at: str = Field(default="", max_length=100)
+    source_url: str = Field(default="", max_length=2000)
+    last_synced_at: datetime | None = None
+    deleted_at: datetime | None = None
+
+
 class WikiPage(SQLModel, table=True):
     id: str = Field(default_factory=new_id, primary_key=True, max_length=32)
     path: str = Field(index=True, max_length=500)

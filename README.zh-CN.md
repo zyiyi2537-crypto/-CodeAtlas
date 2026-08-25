@@ -115,6 +115,31 @@ Embedding Profile 支持 OpenAI-compatible `/embeddings` 和腾讯 TokenHub `/em
 
 > 生产 Token 不应通过公网 HTTP 传输。正式接入应在有效 TLS 证书和 HTTPS 监听器配置完成后，直接使用 `https://` MCP 地址。
 
+### 外部知识源连接器
+
+管理员可在“外部知识源”页面将 AWS S3、腾讯云 COS、Notion 和 Confluence
+接入已有文档集。连接器会周期扫描、跳过未变化版本、保留原文件与来源元数据，
+并复用手动上传文档的结构优先解析、MySQL 权威数据、Chroma 检索投影和可引用 RAG 链路。
+
+浏览器只接受不透明的 `credential_ref`，不会接收或返回云平台 Secret。真实凭据
+必须安装在受保护的服务器环境，例如：
+
+```env
+CODEATLAS_CREDENTIAL_AWS_DOCS='{"access_key_id":"...","secret_access_key":"..."}'
+CODEATLAS_CREDENTIAL_COS_DOCS='{"secret_id":"...","secret_key":"..."}'
+CODEATLAS_CREDENTIAL_NOTION_ENGINEERING='{"token":"..."}'
+CODEATLAS_CREDENTIAL_CONFLUENCE_ENGINEERING='{"email":"admin@example.com","api_token":"..."}'
+```
+
+对象存储支持 Bucket、Prefix、Region、分页清单、有界下载和基于 ETag/LastModified
+的变化检测。Notion 使用固定版本的官方 REST API 并递归读取 Block；Confluence
+支持 Cloud Basic Auth 与 Data Center Bearer Token、Space 范围和 Storage Format
+解析。企业内网 Confluence 主机必须通过 `CODEATLAS_ALLOWED_EXTERNAL_HOSTS` 显式授权。
+
+当前范围是只读定时同步。Notion/Confluence 页面从搜索结果中消失不会被当作删除证据，
+以免权限变化误删本地知识。OAuth 多租户、Webhook、附件以及对象存储
+VersionId/DeleteMarker 同步属于后续增强，不计入本阶段完成范围。
+
 ## 部署
 
 当前域名前部署方式将 Uvicorn 绑定到 `127.0.0.1:8010`，并由 Nginx 在 80 端口通过管理员 IP 白名单对外提供服务。`systemd` 强制使用单个 worker，软内存限制为 550 MB，硬限制为 700 MB。日志保留在 `journald` 中，不包含在备份内。

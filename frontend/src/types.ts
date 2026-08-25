@@ -62,6 +62,24 @@ export interface GitHubSource {
   deploy_key_configured: boolean
 }
 
+export interface ExternalSource {
+  id: string
+  name: string
+  provider: 'aws_s3' | 'tencent_cos' | 'notion' | 'confluence'
+  collection_id: string
+  credential_ref: string
+  credential_env: string
+  credential_configured: boolean
+  config: Record<string, string>
+  enabled: boolean
+  poll_interval_seconds: number
+  sync_status: 'idle' | 'queued' | 'syncing' | 'failed'
+  last_checked_at: string | null
+  last_error: string
+  last_result: Record<string, number>
+  created_at: string
+}
+
 export interface IndexJob {
   id: string
   repository_id: string
@@ -123,6 +141,10 @@ export interface ChatCitation {
   symbol: string
   start_line: number
   end_line: number
+  external_provider: string
+  external_source_id: string
+  external_id: string
+  source_url: string
 }
 
 export interface ChatResponse {

@@ -6,6 +6,7 @@ import BrowseView from '@/views/BrowseView.vue'
 import ChatView from '@/views/ChatView.vue'
 import DocumentsView from '@/views/DocumentsView.vue'
 import EmbeddingProfilesView from '@/views/EmbeddingProfilesView.vue'
+import ExternalSourcesView from '@/views/ExternalSourcesView.vue'
 import GitLabSourcesView from '@/views/GitLabSourcesView.vue'
 import GitHubSourcesView from '@/views/GitHubSourcesView.vue'
 import LoginView from '@/views/LoginView.vue'
@@ -47,6 +48,12 @@ export const router = createRouter({
       name: 'documents',
       component: DocumentsView,
       meta: { requiresAuth: true },
+    },
+    {
+      path: '/external-sources',
+      name: 'external-sources',
+      component: ExternalSourcesView,
+      meta: { requiresAuth: true, requiresAdmin: true },
     },
     {
       path: '/embedding-profiles',

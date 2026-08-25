@@ -38,10 +38,11 @@ describe('AppShell', () => {
     })
     const destinations = wrapper.findAll('.sidebar .nav-item')
 
-    expect(destinations).toHaveLength(12)
+    expect(destinations).toHaveLength(13)
     expect(destinations.at(-1)?.text()).toContain('API Token')
     expect(wrapper.text()).toContain('GitLab 来源')
     expect(wrapper.text()).toContain('GitHub 来源')
+    expect(wrapper.text()).toContain('外部知识源')
   })
 
   it('includes an anonymous login destination in the mobile navigation', async () => {

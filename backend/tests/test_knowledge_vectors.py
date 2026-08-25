@@ -123,6 +123,7 @@ def test_knowledge_search_fuses_vector_and_lexical_results(tmp_path: Path, monke
             )
         ],
     )
+    monkeypatch.setattr(search, "_indexed_document_ids", lambda: {"doc-1"})
     monkeypatch.setattr(
         search.vector_store,
         "search_knowledge",

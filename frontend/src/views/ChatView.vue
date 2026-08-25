@@ -139,7 +139,10 @@ async function ask(question?: string) {
 }
 
 function openCitation(citation: ChatCitation) {
-  if (citation.source_type !== 'code') return
+  if (citation.source_type !== 'code') {
+    if (citation.source_url) window.open(citation.source_url, '_blank', 'noopener,noreferrer')
+    return
+  }
   previewResult.value = {
     repo: citation.repo,
     generation_id: '',
@@ -227,7 +230,7 @@ function openModelSettings() {
               :key="`${citation.source_type}-${citation.source_id}-${citation.section}-${citation.page}-${citationIndex}`"
               class="citation-chip"
               type="button"
-              :disabled="citation.source_type !== 'code'"
+              :disabled="citation.source_type !== 'code' && !citation.source_url"
               @click="openCitation(citation)"
             >
               <FileCode :size="14" />
@@ -239,6 +242,7 @@ function openModelSettings() {
                 </template>
                 <template v-else>
                   {{ citation.source_type === 'wiki' ? 'Wiki' : '文档' }} · {{ citation.title }}
+                  <span v-if="citation.external_provider"> · {{ citation.external_provider }}</span>
                   <span v-if="citation.section"> · {{ citation.section }}</span>
                   <span v-if="citation.page"> · 第 {{ citation.page }} 页</span>
                 </template>

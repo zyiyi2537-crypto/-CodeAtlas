@@ -101,6 +101,10 @@ def test_chat_uses_unified_document_and_wiki_evidence(settings, monkeypatch) -> 
                     "page": 3,
                     "content": "Configure the reverse proxy.",
                     "score": 0.9,
+                    "external_provider": "notion",
+                    "external_source_id": "source-1",
+                    "external_id": "page-1",
+                    "source_url": "https://notion.so/page-1",
                 }
             ]
 
@@ -126,6 +130,10 @@ def test_chat_uses_unified_document_and_wiki_evidence(settings, monkeypatch) -> 
         "symbol": "",
         "start_line": 0,
         "end_line": 0,
+        "external_provider": "notion",
+        "external_source_id": "source-1",
+        "external_id": "page-1",
+        "source_url": "https://notion.so/page-1",
     }
 
 

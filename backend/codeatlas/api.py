@@ -24,6 +24,7 @@ from .auth import (
     resolve_identity,
 )
 from .chat import ChatService, ChatUnavailableError
+from .connectors import credential_environment_name, validate_public_https_base_url
 from .documents import chunk_document, extract_structured_blocks
 from .embeddings import (
     EmbeddingClient,
@@ -58,6 +59,7 @@ from .models import (
     DocumentChunkRecord,
     DocumentCollection,
     EmbeddingProfile,
+    ExternalSource,
     GitHubSource,
     GitLabSource,
     IndexJob,
@@ -74,6 +76,7 @@ from .security import (
     hash_password,
     mask_credential_ref,
     new_secret,
+    redact_secrets,
     validate_credential_ref,
     validate_git_branch,
     validate_git_url,
@@ -144,6 +147,16 @@ class GitHubSourceCreate(BaseModel):
 class DocumentCollectionCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=500)
+
+
+class ExternalSourceCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    provider: str = Field(min_length=1, max_length=40)
+    collection_id: str = Field(min_length=1, max_length=32)
+    credential_ref: str = Field(min_length=1, max_length=200)
+    config: dict[str, str] = Field(default_factory=dict)
+    enabled: bool = True
+    poll_interval_seconds: int = Field(default=1800, ge=300, le=86400)
 
 
 class DocumentSearchRequest(BaseModel):
@@ -304,6 +317,67 @@ def serialize_github_source(source: GitHubSource, repository: Repository | None 
         "created_at": source.created_at,
         "deploy_key_configured": bool(source.ssh_key_path),
     }
+
+
+def serialize_external_source(source: ExternalSource) -> dict:
+    credential_env = credential_environment_name(source.credential_ref)
+    try:
+        config = json.loads(source.config_json or "{}")
+        result = json.loads(source.last_result_json or "{}")
+    except json.JSONDecodeError:
+        config, result = {}, {}
+    return {
+        "id": source.id,
+        "name": source.name,
+        "provider": source.provider,
+        "collection_id": source.collection_id,
+        "credential_ref": mask_credential_ref(source.credential_ref),
+        "credential_env": credential_env,
+        "credential_configured": bool(os.getenv(credential_env, "")),
+        "config": config,
+        "enabled": source.enabled,
+        "poll_interval_seconds": source.poll_interval_seconds,
+        "sync_status": source.sync_status,
+        "last_checked_at": source.last_checked_at,
+        "last_error": source.last_error,
+        "last_result": result,
+        "created_at": source.created_at,
+    }
+
+
+def validate_external_source_config(provider: str, config: dict[str, str]) -> dict[str, str]:
+    required = {
+        "aws_s3": {"bucket", "region"},
+        "tencent_cos": {"bucket", "region"},
+        "notion": set(),
+        "confluence": {"base_url", "space_key", "deployment"},
+    }
+    allowed = {
+        "aws_s3": {"bucket", "prefix", "region", "endpoint_url"},
+        "tencent_cos": {"bucket", "prefix", "region"},
+        "notion": {"root_page_id"},
+        "confluence": {"base_url", "space_key", "root_page_id", "deployment"},
+    }
+    if provider not in required:
+        raise ValueError("provider must be aws_s3, tencent_cos, notion or confluence")
+    normalized = {str(key): str(value).strip() for key, value in config.items()}
+    if any(len(value) > 2000 for value in normalized.values()):
+        raise ValueError("external source config values must not exceed 2000 characters")
+    unknown = set(normalized) - allowed[provider]
+    if unknown:
+        raise ValueError(f"unsupported config fields: {', '.join(sorted(unknown))}")
+    missing = [key for key in required[provider] if not normalized.get(key)]
+    if missing:
+        raise ValueError(f"missing required config fields: {', '.join(sorted(missing))}")
+    if provider == "confluence" and normalized.get("deployment") not in {"cloud", "data_center"}:
+        raise ValueError("Confluence deployment must be cloud or data_center")
+    if provider == "confluence":
+        normalized["base_url"] = validate_public_https_base_url(normalized["base_url"])
+    if provider == "aws_s3" and normalized.get("endpoint_url"):
+        normalized["endpoint_url"] = validate_public_https_base_url(
+            normalized["endpoint_url"]
+        )
+    return normalized
 
 
 def gitlab_credential(request: Request, credential_ref: str) -> str:
@@ -530,6 +604,95 @@ def list_document_collections(request: Request):
             {"id": item.id, "name": item.name, "description": item.description}
             for item in session.exec(statement).all()
         ]
+
+
+@router.get("/external-sources")
+def list_external_sources(request: Request):
+    with database(request) as session:
+        require_admin(request, session)
+        sources = session.exec(
+            select(ExternalSource).order_by(col(ExternalSource.created_at).desc())
+        ).all()
+        return [serialize_external_source(source) for source in sources]
+
+
+@router.post("/external-sources", status_code=201)
+def create_external_source(payload: ExternalSourceCreate, request: Request):
+    with database(request) as session:
+        identity = require_admin(request, session)
+        require_csrf(request, identity)
+        if not session.get(DocumentCollection, payload.collection_id):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Document collection not found")
+        try:
+            credential_ref = validate_credential_ref(payload.credential_ref)
+            config = validate_external_source_config(payload.provider, payload.config)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+        source = ExternalSource(
+            name=payload.name.strip(),
+            provider=payload.provider,
+            collection_id=payload.collection_id,
+            credential_ref=credential_ref,
+            config_json=json.dumps(config, ensure_ascii=False),
+            enabled=payload.enabled,
+            poll_interval_seconds=payload.poll_interval_seconds,
+            created_by=identity.user.id,
+        )
+        session.add(source)
+        session.flush()
+        audit(
+            session,
+            "external_source.create",
+            "external_source",
+            source.id,
+            identity.user.id,
+        )
+        session.commit()
+        session.refresh(source)
+        return serialize_external_source(source)
+
+
+@router.post("/external-sources/{source_id}/test")
+def test_external_source(source_id: str, request: Request):
+    with database(request) as session:
+        identity = require_admin(request, session)
+        require_csrf(request, identity)
+        if not session.get(ExternalSource, source_id):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "External source not found")
+    try:
+        request.app.state.external_sync.test_source(source_id)
+    except Exception as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, redact_secrets(str(exc))
+        ) from exc
+    return {"status": "ok"}
+
+
+@router.post("/external-sources/{source_id}/sync", status_code=202)
+def sync_external_source(source_id: str, request: Request):
+    with database(request) as session:
+        identity = require_admin(request, session)
+        require_csrf(request, identity)
+        if not session.get(ExternalSource, source_id):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "External source not found")
+    try:
+        request.app.state.external_sync.submit(source_id)
+    except RuntimeError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    return {"status": "queued"}
+
+
+@router.delete("/external-sources/{source_id}", status_code=204)
+def delete_external_source(source_id: str, request: Request):
+    with database(request) as session:
+        identity = require_admin(request, session)
+        require_csrf(request, identity)
+        if not session.get(ExternalSource, source_id):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "External source not found")
+    try:
+        request.app.state.external_sync.delete_source(source_id)
+    except RuntimeError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
 
 
 @router.get("/document-collections/{collection_id}/documents")
