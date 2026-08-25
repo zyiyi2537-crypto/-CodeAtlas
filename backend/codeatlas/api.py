@@ -128,7 +128,7 @@ class GitHubSourceCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     repo_url: str = Field(min_length=1, max_length=500)
     branch: str = Field(default="main", max_length=200)
-    ssh_key_id: str = Field(min_length=1, max_length=64)
+    ssh_key_id: str = Field(default="", max_length=64)
     poll_interval_seconds: int = Field(default=1800, ge=300, le=86400)
     visibility: str = "private"
     description: str = Field(default="", max_length=500)
@@ -422,19 +422,27 @@ def create_github_source(payload: GitHubSourceCreate, request: Request):
         identity = require_admin(request, session)
         require_csrf(request, identity)
         try:
-            if not payload.repo_url.strip().startswith("git@"):
-                raise ValueError("GitHub source requires an SSH clone URL")
+            if payload.visibility not in {"public", "private"}:
+                raise ValueError("Invalid visibility")
+            is_ssh = payload.repo_url.strip().startswith("git@")
+            if payload.visibility == "public" and is_ssh:
+                raise ValueError("Public GitHub sources require an HTTPS clone URL")
+            if payload.visibility == "private" and not is_ssh:
+                raise ValueError("Private GitHub sources require an SSH clone URL")
             git_url = validate_source_url(
                 payload.repo_url, request.app.state.settings.allowed_git_hosts
             )
             owner, repository_name = repository_identity(git_url)
             branch = validate_git_branch(payload.branch)
-            key_path = resolve_deploy_key(request.app.state.settings, payload.ssh_key_id)
+            if payload.visibility == "private":
+                if not payload.ssh_key_id:
+                    raise ValueError("Private GitHub sources require a Deploy Key")
+                key_path = resolve_deploy_key(request.app.state.settings, payload.ssh_key_id)
+            else:
+                key_path = None
             name = validate_repository_name(repository_name)
         except ValueError as exc:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
-        if payload.visibility not in {"public", "private"}:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Invalid visibility")
         if session.exec(
             select(GitHubSource).where(GitHubSource.name == payload.name.strip())
         ).first():
@@ -458,7 +466,7 @@ def create_github_source(payload: GitHubSourceCreate, request: Request):
             repository=repository_name,
             branch=branch,
             repository_id=repo.id,
-            ssh_key_path=str(key_path),
+            ssh_key_path=str(key_path) if key_path else "",
             poll_interval_seconds=payload.poll_interval_seconds,
             created_by=identity.user.id,
         )

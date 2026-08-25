@@ -1,3 +1,8 @@
+export const GITHUB_SSH_CLONE_PATTERN =
+  'git@github\\.com:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\\.git'
+export const GITHUB_HTTPS_CLONE_PATTERN =
+  'https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\\.git'
+
 export function normalizeOpenSshPublicKey(value: string): string {
   const fields = value.trim().split(/\s+/)
   if (fields.length < 2) throw new Error('公钥格式不完整')
@@ -11,10 +16,23 @@ export function normalizeOpenSshPublicKey(value: string): string {
   return `${type} ${payload}`
 }
 
-export function normalizeGitHubCloneUrl(value: string): string {
+export function normalizeGitHubCloneUrl(
+  value: string,
+  visibility: 'public' | 'private',
+): string {
   const normalized = value.trim()
-  const match = normalized.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/i)
-  if (match) return `git@github.com:${match[1]}/${match[2]}.git`
+  const httpsMatch = normalized.match(
+    /^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?$/i,
+  )
+  const sshMatch = normalized.match(
+    /^git@github\.com:([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?$/i,
+  )
+  if (visibility === 'private' && httpsMatch) {
+    return `git@github.com:${httpsMatch[1]}/${httpsMatch[2]}.git`
+  }
+  if (visibility === 'public' && sshMatch) {
+    return `https://github.com/${sshMatch[1]}/${sshMatch[2]}.git`
+  }
   return normalized
 }
 

@@ -7,7 +7,13 @@ import { api, errorMessage } from '@/api'
 import { csrfHeaders } from '@/auth'
 import EmptyState from '@/components/EmptyState.vue'
 import { formatDate } from '@/format'
-import { copyText, normalizeGitHubCloneUrl, normalizeOpenSshPublicKey } from '@/sshKey'
+import {
+  copyText,
+  GITHUB_HTTPS_CLONE_PATTERN,
+  GITHUB_SSH_CLONE_PATTERN,
+  normalizeGitHubCloneUrl,
+  normalizeOpenSshPublicKey,
+} from '@/sshKey'
 import type { GitHubSource } from '@/types'
 
 const queryClient = useQueryClient()
@@ -16,7 +22,14 @@ const formError = ref('')
 const generatedKey = ref<{ key_id: string; public_key: string } | null>(null)
 const copied = ref(false)
 const keyInput = ref<HTMLInputElement | null>(null)
-const form = reactive({
+const form = reactive<{
+  name: string
+  repo_url: string
+  branch: string
+  poll_interval_seconds: number
+  visibility: 'public' | 'private'
+  description: string
+}>({
   name: '',
   repo_url: 'git@github.com:owner/repository.git',
   branch: 'main',
@@ -43,7 +56,7 @@ const createSource = useMutation({
   mutationFn: async () => (
     await api.post('/github-sources', {
       ...form,
-      ssh_key_id: generatedKey.value?.key_id,
+      ssh_key_id: form.visibility === 'private' ? generatedKey.value?.key_id : undefined,
     }, { headers: csrfHeaders() })
   ).data,
   onSuccess: async () => {
@@ -77,7 +90,7 @@ async function copyKey() {
 }
 
 function normalizeCloneUrl() {
-  form.repo_url = normalizeGitHubCloneUrl(form.repo_url)
+  form.repo_url = normalizeGitHubCloneUrl(form.repo_url, form.visibility)
 }
 
 function closeDialog() {
@@ -130,7 +143,11 @@ function closeDialog() {
           <div><p class="eyebrow">NEW GITHUB SOURCE</p><h2>添加 GitHub 仓库</h2></div>
           <button class="icon-button" type="button" aria-label="关闭" @click="closeDialog"><X :size="18" /></button>
         </header>
-        <div v-if="!generatedKey" class="key-setup-block">
+        <div v-if="form.visibility === 'public'" class="key-setup-block">
+          <div class="key-setup-icon"><Github :size="20" /></div>
+          <div><strong>公开仓库无需 Deploy Key</strong><p>使用 GitHub Code → HTTPS 地址即可读取公开源码。</p></div>
+        </div>
+        <div v-else-if="!generatedKey" class="key-setup-block">
           <div class="key-setup-icon"><KeyRound :size="20" /></div>
           <div><strong>先生成只读 Deploy Key</strong><p>公钥会显示在下一步，私钥只保存在服务器上。</p></div>
           <button class="command-button" type="button" :disabled="generateKey.isPending.value" @click="generateKey.mutate()">生成 Key</button>
@@ -144,15 +161,25 @@ function closeDialog() {
         <form class="stack-form two-column-form" @submit.prevent="createSource.mutate()">
           <label><span>来源名称</span><input v-model="form.name" placeholder="my-github-repo" required /></label>
           <label><span>分支</span><input v-model="form.branch" required /></label>
-          <label class="full-span"><span>SSH Clone URL</span><input v-model="form.repo_url" pattern="git@github\\.com:.+/.+\\.git" required placeholder="git@github.com:owner/repository.git" @blur="normalizeCloneUrl" /><small class="form-hint">必须是 GitHub Code → SSH 地址；粘贴 HTTPS 地址后离开输入框会自动转换。</small></label>
+          <label class="full-span">
+            <span>{{ form.visibility === 'public' ? 'HTTPS Clone URL' : 'SSH Clone URL' }}</span>
+            <input
+              v-model="form.repo_url"
+              :pattern="form.visibility === 'public' ? GITHUB_HTTPS_CLONE_PATTERN : GITHUB_SSH_CLONE_PATTERN"
+              required
+              :placeholder="form.visibility === 'public' ? 'https://github.com/owner/repository.git' : 'git@github.com:owner/repository.git'"
+              @blur="normalizeCloneUrl"
+            />
+            <small class="form-hint">{{ form.visibility === 'public' ? '公开仓库使用 GitHub Code → HTTPS 地址，无需添加 Deploy Key。' : '私有仓库使用 GitHub Code → SSH 地址，并将上方公钥添加为只读 Deploy Key。' }}</small>
+          </label>
           <label><span>检查间隔（秒）</span><input v-model.number="form.poll_interval_seconds" type="number" min="300" max="86400" required /></label>
-          <label><span>可见性</span><select v-model="form.visibility"><option value="private">private</option><option value="public">public</option></select></label>
+          <label><span>可见性</span><select v-model="form.visibility" @change="normalizeCloneUrl"><option value="private">private</option><option value="public">public</option></select></label>
           <label class="full-span"><span>描述</span><textarea v-model="form.description" rows="2" /></label>
-          <p class="form-hint full-span">每个仓库使用独立 Deploy Key。私钥不会返回页面，也不会写入数据库。</p>
+          <p class="form-hint full-span">{{ form.visibility === 'public' ? '公开仓库通过 HTTPS 只读同步，不需要密钥。' : '每个私有仓库使用独立 Deploy Key。私钥不会返回页面，也不会写入数据库。' }}</p>
           <div v-if="formError" class="error-banner full-span">{{ formError }}</div>
           <div class="form-actions full-span">
             <button class="secondary-button" type="button" @click="closeDialog">取消</button>
-            <button class="command-button" type="submit" :disabled="!generatedKey || createSource.isPending.value">保存并启用自动同步</button>
+            <button class="command-button" type="submit" :disabled="(form.visibility === 'private' && !generatedKey) || createSource.isPending.value">保存并启用自动同步</button>
           </div>
         </form>
       </section>

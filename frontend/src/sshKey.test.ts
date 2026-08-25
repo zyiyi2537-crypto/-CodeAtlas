@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
-import { normalizeGitHubCloneUrl, normalizeOpenSshPublicKey } from './sshKey'
+import {
+  GITHUB_HTTPS_CLONE_PATTERN,
+  GITHUB_SSH_CLONE_PATTERN,
+  normalizeGitHubCloneUrl,
+  normalizeOpenSshPublicKey,
+} from './sshKey'
 
 describe('normalizeOpenSshPublicKey', () => {
   it('removes visual or pasted whitespace without changing key fields', () => {
@@ -24,15 +29,24 @@ describe('normalizeOpenSshPublicKey', () => {
 })
 
 describe('normalizeGitHubCloneUrl', () => {
-  it('converts a GitHub HTTPS clone URL to SSH', () => {
-    expect(normalizeGitHubCloneUrl('https://github.com/Bytedesk/bytedesk.git')).toBe(
+  it('converts a GitHub HTTPS clone URL to SSH for private repositories', () => {
+    expect(normalizeGitHubCloneUrl('https://github.com/Bytedesk/bytedesk.git', 'private')).toBe(
       'git@github.com:Bytedesk/bytedesk.git',
     )
   })
 
-  it('preserves a GitHub SSH clone URL', () => {
-    expect(normalizeGitHubCloneUrl('git@github.com:Bytedesk/bytedesk.git')).toBe(
-      'git@github.com:Bytedesk/bytedesk.git',
+  it('converts a GitHub SSH clone URL to HTTPS for public repositories', () => {
+    expect(normalizeGitHubCloneUrl('git@github.com:yt-dlp/yt-dlp.git', 'public')).toBe(
+      'https://github.com/yt-dlp/yt-dlp.git',
     )
+  })
+
+  it('accepts the clone URLs copied from the GitHub Code menu', () => {
+    expect(new RegExp(`^(?:${GITHUB_SSH_CLONE_PATTERN})$`).test(
+      'git@github.com:yt-dlp/yt-dlp.git',
+    )).toBe(true)
+    expect(new RegExp(`^(?:${GITHUB_HTTPS_CLONE_PATTERN})$`).test(
+      'https://github.com/yt-dlp/yt-dlp.git',
+    )).toBe(true)
   })
 })

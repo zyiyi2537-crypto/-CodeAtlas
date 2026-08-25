@@ -85,8 +85,16 @@ def ssh_command(settings: Settings, key_path: str | Path) -> str:
     )
 
 
-def remote_commit(settings: Settings, git_url: str, branch: str, key_path: str | Path) -> str:
+def remote_commit(
+    settings: Settings,
+    git_url: str,
+    branch: str,
+    key_path: str | Path = "",
+) -> str:
     validate_git_url(git_url, settings.allowed_git_hosts)
+    environment = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    if key_path:
+        environment["GIT_SSH_COMMAND"] = ssh_command(settings, key_path)
     try:
         result = subprocess.run(
             ["git", "ls-remote", git_url, f"refs/heads/{branch}"],
@@ -94,7 +102,7 @@ def remote_commit(settings: Settings, git_url: str, branch: str, key_path: str |
             capture_output=True,
             text=True,
             timeout=settings.git_timeout_seconds,
-            env={**os.environ, "GIT_SSH_COMMAND": ssh_command(settings, key_path)},
+            env=environment,
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
         detail = getattr(exc, "stderr", "") or str(exc)
