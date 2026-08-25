@@ -36,6 +36,8 @@ def test_external_endpoint_resolution_rejects_dns_rebinding(monkeypatch) -> None
         "64:ff9b:1::7f00:1",
         "2002:7f00:1::",
         "2001:0000:4136:e378:8000:63bf:3fff:fdd2",
+        "224.0.0.1",
+        "ff02::1",
     ],
 )
 def test_external_endpoint_rejects_ip_transition_addresses(
@@ -73,6 +75,8 @@ def test_allowlisted_confluence_accepts_only_ordinary_private_address(monkeypatc
         "64:ff9b::7f00:1",
         "2002:7f00:1::",
         "2001:0000:4136:e378:8000:63bf:3fff:fdd2",
+        "224.0.0.1",
+        "ff02::1",
     ],
 )
 def test_allowlisted_confluence_rejects_unsafe_private_or_transition_address(

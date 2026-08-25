@@ -63,7 +63,7 @@ _ALLOWLISTED_PRIVATE_NETWORKS = (
 
 def _is_public_destination(address: str) -> bool:
     value = ipaddress.ip_address(address.split("%", 1)[0])
-    if not value.is_global:
+    if value.is_multicast or value.is_unspecified or value.is_reserved or not value.is_global:
         return False
     if isinstance(value, IPv6Address):
         if value.ipv4_mapped is not None or value.sixtofour is not None or value.teredo is not None:
@@ -75,6 +75,8 @@ def _is_public_destination(address: str) -> bool:
 
 def _is_allowlisted_private_destination(address: str) -> bool:
     value = ipaddress.ip_address(address.split("%", 1)[0])
+    if value.is_multicast or value.is_unspecified or value.is_reserved:
+        return False
     if isinstance(value, IPv6Address) and (
         value.ipv4_mapped is not None
         or value.sixtofour is not None
