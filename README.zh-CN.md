@@ -168,13 +168,13 @@ git@github.com:owner/repository.git
 
 ### Embedding 模型切换
 
-管理员可以在 `Embedding 模型` 页面添加 OpenAI 兼容的 Embedding 配置，并点击 `设为当前`。页面中的 `credential_ref` 只是服务端凭据引用，例如 `embedding-company`；不要将 API Key 粘贴到浏览器中。请在服务运行环境里配置对应的敏感变量：
+管理员可以在 `Embedding 模型` 页面添加 OpenAI 兼容的 Embedding 配置，并点击 `设为当前`。页面默认预填硅基流动托管的 `BAAI/bge-m3`（Base URL `https://api.siliconflow.cn/v1`，1024 维）。页面中的 `credential_ref` 只是服务端凭据引用；不要将 API Key 粘贴到浏览器中。请在服务运行环境里配置对应的敏感变量：
 
 ```env
-CODEATLAS_CREDENTIAL_EMBEDDING_COMPANY=your-real-key
+CODEATLAS_CREDENTIAL_SILICONFLOW_EMBEDDING=your-real-key
 ```
 
-激活配置时，系统会验证服务端凭据，并自动为已有仓库创建重新索引任务。索引和后续检索都会使用当前配置的 Base URL、模型、API Key 与向量维度。当前 Chroma Collection 的维度必须与配置一致；切换到不同维度需要执行单独的向量 Collection 迁移。
+配置 API Key 后，先点击 `探测维度`，确认返回 1024，再保存并激活。激活配置时，系统会验证服务端凭据，并自动为已有仓库创建重新索引任务，同时重建文档和 Wiki 向量。索引和后续检索都会使用当前配置的 Base URL、模型、API Key 与向量维度。未配置服务器凭据的 Profile 无法激活；示例环境继续使用 `hash` 兜底，避免缺少第三方 Key 时服务无法启动。
 
 ## 安全模型
 

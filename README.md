@@ -202,19 +202,21 @@ deployment upgrade, run `alembic upgrade head` before creating GitHub sources.
 ### Embedding model switching
 
 Administrators can add an OpenAI-compatible embedding profile from the
-`Embedding 模型` page and click `设为当前`. The page field `credential_ref` is
-only a server-side reference such as `embedding-company`; never paste an API
+`Embedding 模型` page and click `设为当前`. The form defaults to SiliconFlow's
+hosted `BAAI/bge-m3` (`https://api.siliconflow.cn/v1`, 1024 dimensions). The
+page field `credential_ref` is only a server-side reference; never paste an API
 key into the browser. Configure the matching secret in the service environment:
 
 ```env
-CODEATLAS_CREDENTIAL_EMBEDDING_COMPANY=your-real-key
+CODEATLAS_CREDENTIAL_SILICONFLOW_EMBEDDING=your-real-key
 ```
 
-Activating a profile validates the server-side credential and automatically
-queues re-index jobs for existing repositories. Both indexing and subsequent
-search queries use the active profile's Base URL, model, API key and dimension.
-The current Chroma collection dimension must match the profile; changing to a
-different dimension requires a separate vector collection migration.
+After configuring the API key, probe the dimension and confirm it returns 1024
+before saving and activating the profile. Activation validates the server-side
+credential, queues re-index jobs for existing repositories, and rebuilds
+document and Wiki vectors. Profiles without a configured server credential
+cannot be activated. Example environments keep `hash` as a safe startup
+fallback when no third-party key is installed.
 
 ## Security Model
 

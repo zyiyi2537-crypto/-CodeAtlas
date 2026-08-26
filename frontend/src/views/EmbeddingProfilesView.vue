@@ -6,8 +6,11 @@ import { reactive, ref } from 'vue'
 import { api, errorMessage } from '@/api'
 import { csrfHeaders } from '@/auth'
 import EmptyState from '@/components/EmptyState.vue'
+import {
+  createEmbeddingProfileForm,
+  type EmbeddingProvider,
+} from '@/embeddingProfiles'
 
-type Provider = 'openai' | 'tencent_multimodal'
 interface Profile {
   id: string
   name: string
@@ -18,7 +21,7 @@ interface Profile {
   credential_configured: boolean
   credential_env: string
   backend: string
-  provider: Provider
+  provider: EmbeddingProvider
   is_active: boolean
   queued_jobs?: number
 }
@@ -26,14 +29,7 @@ interface Profile {
 const queryClient = useQueryClient()
 const showCreate = ref(false)
 const error = ref('')
-const form = reactive({
-  name: '',
-  base_url: '',
-  model: '',
-  dimension: 1024,
-  credential_ref: '',
-  provider: 'openai' as Provider,
-})
+const form = reactive(createEmbeddingProfileForm())
 const profiles = useQuery({
   queryKey: ['embedding-profiles'],
   queryFn: async () => (await api.get<Profile[]>('/embedding-profiles')).data,
@@ -43,14 +39,7 @@ const create = useMutation({
     (await api.post('/embedding-profiles', form, { headers: csrfHeaders() })).data,
   onSuccess: async () => {
     showCreate.value = false
-    Object.assign(form, {
-      name: '',
-      base_url: '',
-      model: '',
-      dimension: 1024,
-      credential_ref: '',
-      provider: 'openai',
-    })
+    Object.assign(form, createEmbeddingProfileForm())
     await queryClient.invalidateQueries({ queryKey: ['embedding-profiles'] })
   },
   onError: (e) => {
@@ -163,12 +152,12 @@ const probe = useMutation({
               <option value="tencent_multimodal">腾讯 TokenHub /embeddings/multimodal</option>
             </select>
           </label>
-          <label><span>名称</span><input v-model="form.name" required placeholder="tencent-kinfra" /></label>
+          <label><span>名称</span><input v-model="form.name" required placeholder="SiliconFlow BGE-M3" /></label>
           <label>
             <span>Base URL</span>
-            <input v-model="form.base_url" type="url" required placeholder="https://tokenhub.tencentmaas.com/v1" />
+            <input v-model="form.base_url" type="url" required placeholder="https://api.siliconflow.cn/v1" />
           </label>
-          <label><span>模型名</span><input v-model="form.model" required placeholder="kinfra-vl-embedding-2b" /></label>
+          <label><span>模型名</span><input v-model="form.model" required placeholder="BAAI/bge-m3" /></label>
           <label>
             <span>维度</span>
             <span class="inline-field">
@@ -185,11 +174,11 @@ const probe = useMutation({
           </label>
           <label>
             <span>凭据引用</span>
-            <input v-model="form.credential_ref" required placeholder="tencent-kinfra" />
+            <input v-model="form.credential_ref" required placeholder="siliconflow-embedding" />
           </label>
           <p class="form-hint">
             填写引用名称，不要填写 API Key。服务器需配置对应环境变量
-            CODEATLAS_CREDENTIAL_TENCENT_KINFRA，密钥不会进入数据库。先探测真实向量维度，再保存并激活。
+            CODEATLAS_CREDENTIAL_SILICONFLOW_EMBEDDING，密钥不会进入数据库。先探测真实向量维度，再保存并激活。
           </p>
           <div class="form-actions">
             <button class="secondary-button" type="button" @click="showCreate = false">取消</button>
