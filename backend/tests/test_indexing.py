@@ -251,6 +251,49 @@ def test_public_github_sync_uses_codeload_snapshot(
     assert (checkout / "demo.py").read_text(encoding="utf-8") == "value = 1\n"
 
 
+def test_public_github_sync_resolves_commit_before_codeload(
+    settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CODEATLAS_ALLOW_PRIVATE_GIT_HOSTS", "true")
+    source = tmp_path / "snapshot-source-resolved"
+    nested = source / "public-snapshot-commit"
+    nested.mkdir(parents=True)
+    (nested / "demo.py").write_text("value = 2\n", encoding="utf-8")
+    archive = tmp_path / "resolved-snapshot.tar.gz"
+    import tarfile
+
+    with tarfile.open(archive, "w:gz") as bundle:
+        bundle.add(nested, arcname=nested.name)
+    resolved: list[tuple[str, str]] = []
+    requested: list[str] = []
+
+    def resolve(_settings, git_url: str, branch: str, _key_path="") -> str:
+        resolved.append((git_url, branch))
+        return "d" * 40
+
+    def download(url: str, destination: Path, _timeout: int) -> None:
+        requested.append(url)
+        destination.write_bytes(archive.read_bytes())
+
+    monkeypatch.setattr("codeatlas.github.remote_commit", resolve)
+    monkeypatch.setattr("codeatlas.repositories._download_file", download)
+
+    checkout, commit = sync_repository(
+        settings,
+        "public-snapshot-resolved",
+        "resolved-job",
+        "https://github.com/example/public-snapshot.git",
+        "main",
+    )
+
+    assert commit == "d" * 40
+    assert resolved == [("https://github.com/example/public-snapshot.git", "main")]
+    assert requested == [
+        "https://codeload.github.com/example/public-snapshot/tar.gz/" + "d" * 40
+    ]
+    assert (checkout / "demo.py").read_text(encoding="utf-8") == "value = 2\n"
+
+
 def test_repository_scope_isolates_private_repositories(
     settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

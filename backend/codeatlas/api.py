@@ -1007,6 +1007,7 @@ def activate_embedding_profile(profile_id: str, request: Request):
                             repository_id=repository.id,
                             created_by=identity.user.id,
                             message=f"Queued after switching to embedding model {profile.name}",
+                            commit=repository.last_commit,
                         ),
                     )
                 except ActiveIndexJobError as exc:

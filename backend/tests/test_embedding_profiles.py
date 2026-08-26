@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlmodel import Session, select
 
+from codeatlas.models import IndexJob, Repository
 from tests.conftest import login_admin
 
 
@@ -59,6 +61,62 @@ def test_admin_can_activate_embedding_profile_and_queue_reindex(
     assert application.state.knowledge_search is original_search
     assert application.state.external_sync.knowledge_search is application.state.knowledge_search
     assert application.state.knowledge_search.vector_store.namespace == created.json()["id"]
+
+
+def test_embedding_activation_pins_reindex_to_repository_commit(
+    client: TestClient, application, admin, monkeypatch
+) -> None:
+    monkeypatch.setenv("CODEATLAS_CREDENTIAL_EMBEDDING_COMPANY", "server-only-key")
+    with Session(application.state.engine) as session:
+        repository = Repository(
+            name="public-snapshot",
+            git_url="https://github.com/example/public-snapshot.git",
+            branch="main",
+            visibility="public",
+            status="ready",
+            last_commit="a" * 40,
+            created_by=admin.id,
+        )
+        session.add(repository)
+        session.commit()
+        session.refresh(repository)
+        repository_id = repository.id
+
+    csrf = login_admin(client)
+    created = client.post(
+        "/api/v1/embedding-profiles",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "name": "commit-pinned-bge",
+            "base_url": "http://embedding.internal/v1",
+            "model": "bge-m3",
+            "dimension": 128,
+            "credential_ref": "embedding-company",
+        },
+    )
+    monkeypatch.setattr(
+        "codeatlas.api.EmbeddingClient.probe_dimension", lambda _self: 128
+    )
+    submitted: list[str] = []
+    monkeypatch.setattr(
+        application.state.job_queue,
+        "submit",
+        lambda job_ids: submitted.extend(job_ids),
+    )
+
+    activated = client.post(
+        f"/api/v1/embedding-profiles/{created.json()['id']}/activate",
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    assert activated.status_code == 200
+    assert activated.json()["queued_jobs"] == 1
+    assert len(submitted) == 1
+    with Session(application.state.engine) as session:
+        job = session.exec(
+            select(IndexJob).where(IndexJob.repository_id == repository_id)
+        ).one()
+    assert job.commit == "a" * 40
 
 
 def test_embedding_activation_requires_server_credential(client: TestClient, admin) -> None:

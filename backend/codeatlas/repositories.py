@@ -126,6 +126,10 @@ def sync_repository(
     cache = _managed_path(settings, ".cache", repository_id)
     checkout = _managed_path(settings, repository_id, checkout_id)
     if git_url.startswith("https://github.com/"):
+        if not commit:
+            from .github import remote_commit
+
+            commit = remote_commit(settings, git_url, branch)
         return _sync_public_github_snapshot(settings, checkout, git_url, commit)
     git_environment = {
         "GIT_TERMINAL_PROMPT": "0",
