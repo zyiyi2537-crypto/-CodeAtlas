@@ -8,7 +8,9 @@ from git.cmd import Git
 from sqlalchemy import create_engine, text
 from sqlmodel import Session
 
+from codeatlas.chunker import CodeChunk
 from codeatlas.database import create_database, initialize_database
+from codeatlas.embeddings import EmbeddingClient
 from codeatlas.indexing import IndexCoordinator
 from codeatlas.legacy_migration import migrate_sqlite_database
 from codeatlas.models import (
@@ -22,6 +24,7 @@ from codeatlas.models import (
 from codeatlas.repositories import sync_repository
 from codeatlas.retrieval import CodeRetriever
 from codeatlas.settings import Settings
+from codeatlas.vector_store import VectorStore
 
 
 def seed_job(engine, repository_name: str = "demo") -> tuple[Repository, IndexJob]:
@@ -83,6 +86,12 @@ def test_index_success_search_version_switch_and_failure_rollback(
         session.commit()
         session.refresh(second_job)
 
+    assert any(
+        (collection.metadata or {}).get("embedding_namespace")
+        == f"default:code:{first_generation_id}"
+        for collection in VectorStore(settings).client.list_collections()
+    )
+
     results = CodeRetriever(settings, engine).search("calculate invoice")
     assert results
     assert results[0]["path"] == "service.py"
@@ -106,6 +115,15 @@ def test_index_success_search_version_switch_and_failure_rollback(
         session.commit()
         session.refresh(failed_job)
 
+    namespaces = {
+        (collection.metadata or {}).get("embedding_namespace")
+        for collection in VectorStore(settings).client.list_collections()
+    }
+    assert f"default:code:{first_generation_id}" not in namespaces
+    assert f"default:code:{active_generation_id}" in namespaces
+    updated_results = CodeRetriever(settings, engine).search("updated invoice")
+    assert updated_results and updated_results[0]["commit"] == "b" * 40
+
     code.unlink()
     coordinator._run(failed_job.id)
     with Session(engine) as session:
@@ -123,6 +141,247 @@ def test_index_success_search_version_switch_and_failure_rollback(
         ).scalar_one()
         assert count == 0
     coordinator.shutdown()
+
+
+def test_partial_vector_generation_is_deleted_without_touching_active_index(
+    settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = create_database(settings)
+    initialize_database(settings, engine)
+    repository, first_job = seed_job(engine, "atomic-vectors")
+    source = tmp_path / "atomic-source"
+    source.mkdir()
+    (source / "service.py").write_text(
+        "def calculate_invoice(total):\n    return total * 2\n",
+        encoding="utf-8",
+    )
+    commits = iter(["a" * 40, "b" * 40])
+    monkeypatch.setattr(
+        "codeatlas.indexing.sync_repository",
+        lambda *_args, **_kwargs: (source, next(commits)),
+    )
+    coordinator = IndexCoordinator(settings, engine)
+    coordinator._run(first_job.id)
+    with Session(engine) as session:
+        current = session.get(Repository, repository.id)
+        assert current is not None and current.active_generation_id
+        active_generation_id = current.active_generation_id
+        failed_job = IndexJob(repository_id=repository.id, created_by=first_job.created_by)
+        session.add(failed_job)
+        session.commit()
+        session.refresh(failed_job)
+        failed_job_id = failed_job.id
+
+    original_add = VectorStore.add_generation
+
+    def partially_add_then_fail(self, chunks, embedder, batch_size=32):
+        original_add(self, chunks[:1], embedder, batch_size)
+        raise RuntimeError("simulated vector publish failure")
+
+    monkeypatch.setattr(VectorStore, "add_generation", partially_add_then_fail)
+    coordinator._run(failed_job_id)
+
+    with Session(engine) as session:
+        failed = session.get(IndexJob, failed_job_id)
+        current = session.get(Repository, repository.id)
+        assert failed is not None and failed.status == "failed"
+        assert current is not None and current.active_generation_id == active_generation_id
+        failed_generation_id = failed.generation_id
+    namespaces = {
+        (collection.metadata or {}).get("embedding_namespace")
+        for collection in VectorStore(settings).client.list_collections()
+    }
+    assert f"default:code:{active_generation_id}" in namespaces
+    assert f"default:code:{failed_generation_id}" not in namespaces
+    assert CodeRetriever(settings, engine).search("calculate invoice")
+    coordinator.shutdown()
+
+
+def test_retriever_supports_legacy_profile_collection_during_generation_migration(
+    settings: Settings,
+) -> None:
+    engine = create_database(settings)
+    initialize_database(settings, engine)
+    user = User(
+        email="legacy-vectors@example.com",
+        display_name="Admin",
+        password_hash="not-used",
+        role="admin",
+    )
+    repository = Repository(
+        name="legacy-vectors",
+        git_url="https://github.com/org/legacy-vectors.git",
+        branch="main",
+        visibility="public",
+        status="ready",
+        created_by=user.id,
+    )
+    generation = IndexGeneration(
+        repository_id=repository.id,
+        commit="a" * 40,
+        status="active",
+        chunk_count=1,
+    )
+    repository.active_generation_id = generation.id
+    repository.last_commit = generation.commit
+    repository.chunk_count = 1
+    generation_id = generation.id
+    chunk = CodeChunk(
+        id="legacy-vector-chunk",
+        repository_id=repository.id,
+        generation_id=generation.id,
+        commit=generation.commit,
+        path="legacy.py",
+        language="python",
+        symbol="legacy_vector_search",
+        start_line=1,
+        end_line=2,
+        content="def legacy_vector_search():\n    return 'semantic retrieval'",
+    )
+    with Session(engine) as session:
+        session.add(user)
+        session.commit()
+        session.add(repository)
+        session.commit()
+        session.add(generation)
+        session.commit()
+        session.add(
+            CodeChunkRecord(
+                id=chunk.id,
+                generation_id=chunk.generation_id,
+                repository_id=chunk.repository_id,
+                commit=chunk.commit,
+                path=chunk.path,
+                language=chunk.language,
+                symbol=chunk.symbol,
+                start_line=chunk.start_line,
+                end_line=chunk.end_line,
+                content=chunk.content,
+            )
+        )
+        session.commit()
+    VectorStore(settings, namespace="default").add_generation(
+        [chunk], EmbeddingClient(settings)
+    )
+
+    retriever = CodeRetriever(settings, engine)
+    results = retriever.search("semantic retrieval")
+
+    assert results and results[0]["vector_score"] > 0
+    assert retriever.vector_count() == 1
+    assert not VectorStore(settings).has_namespace(
+        f"default:code:{generation_id}"
+    )
+
+
+def test_active_generation_remains_searchable_during_reindex(
+    settings: Settings,
+) -> None:
+    engine = create_database(settings)
+    initialize_database(settings, engine)
+    user = User(
+        email="reindex-search@example.com",
+        display_name="Admin",
+        password_hash="not-used",
+        role="admin",
+    )
+    repository = Repository(
+        name="reindex-search",
+        git_url="https://github.com/org/reindex-search.git",
+        branch="main",
+        visibility="public",
+        status="indexing",
+        created_by=user.id,
+    )
+    generation = IndexGeneration(
+        repository_id=repository.id,
+        commit="a" * 40,
+        status="active",
+        chunk_count=1,
+    )
+    repository.active_generation_id = generation.id
+    repository.last_commit = generation.commit
+    repository.chunk_count = 1
+    chunk = CodeChunk(
+        id="reindex-search-chunk",
+        repository_id=repository.id,
+        generation_id=generation.id,
+        commit=generation.commit,
+        path="service.py",
+        language="python",
+        symbol="keep_searching",
+        start_line=1,
+        end_line=2,
+        content="def keep_searching():\n    return 'active generation'",
+    )
+    with Session(engine) as session:
+        session.add(user)
+        session.commit()
+        session.add(repository)
+        session.commit()
+        session.add(generation)
+        session.commit()
+        session.add(
+            CodeChunkRecord(
+                id=chunk.id,
+                generation_id=chunk.generation_id,
+                repository_id=chunk.repository_id,
+                commit=chunk.commit,
+                path=chunk.path,
+                language=chunk.language,
+                symbol=chunk.symbol,
+                start_line=chunk.start_line,
+                end_line=chunk.end_line,
+                content=chunk.content,
+            )
+        )
+        session.commit()
+    VectorStore(settings).add_generation([chunk], EmbeddingClient(settings))
+
+    retriever = CodeRetriever(settings, engine)
+
+    assert retriever.search("active generation")
+    assert retriever.vector_count() == 1
+
+
+def test_archived_repository_with_active_generation_is_not_searchable(
+    settings: Settings,
+) -> None:
+    engine = create_database(settings)
+    initialize_database(settings, engine)
+    user = User(
+        email="archived-search@example.com",
+        display_name="Admin",
+        password_hash="not-used",
+        role="admin",
+    )
+    repository = Repository(
+        name="archived-search",
+        git_url="https://github.com/org/archived-search.git",
+        branch="main",
+        visibility="public",
+        status="archived",
+        created_by=user.id,
+    )
+    generation = IndexGeneration(
+        repository_id=repository.id,
+        commit="a" * 40,
+        status="active",
+        chunk_count=1,
+    )
+    repository.active_generation_id = generation.id
+    with Session(engine) as session:
+        session.add(user)
+        session.commit()
+        session.add(repository)
+        session.commit()
+        session.add(generation)
+        session.commit()
+
+    retriever = CodeRetriever(settings, engine)
+
+    assert retriever.allowed_repositories(None) == []
+    assert retriever.vector_count() == 0
 
 
 def test_initialize_database_requeues_interrupted_jobs(settings: Settings) -> None:

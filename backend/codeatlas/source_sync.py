@@ -73,6 +73,7 @@ class SourcePollingCoordinator:
                         message=revision.message,
                     ),
                     skip_if_active=True,
+                    skip_if_latest_commit=True,
                 )
                 queued += int(job is not None)
             self.adapter.record_result(source_id, "")

@@ -38,6 +38,10 @@ def _collection_name(namespace: str, dimension: int) -> str:
     return f"codeatlas_{_safe_namespace(namespace)}_{dimension}"
 
 
+def code_generation_namespace(profile_namespace: str, generation_id: str) -> str:
+    return f"{profile_namespace}:code:{generation_id}"
+
+
 class VectorStore:
     def __init__(self, settings: Settings, namespace: str = "default"):
         self.settings = settings
@@ -59,6 +63,15 @@ class VectorStore:
         )
         if configured_dimension != settings.embedding_dimension:
             raise ValueError("Chroma collection embedding dimension does not match configuration")
+
+    def has_namespace(self, namespace: str) -> bool:
+        name = _collection_name(namespace, self.settings.embedding_dimension)
+        return any(collection.name == name for collection in self.client.list_collections())
+
+    def delete_namespace(self, namespace: str) -> None:
+        name = _collection_name(namespace, self.settings.embedding_dimension)
+        if any(collection.name == name for collection in self.client.list_collections()):
+            self.client.delete_collection(name)
 
     def add_generation(
         self, chunks: list[CodeChunk], embedder: EmbeddingClient, batch_size: int = 32
@@ -153,6 +166,15 @@ class VectorStore:
     def delete_generation(self, generation_id: str) -> None:
         if self.collection.count():
             self.collection.delete(where={"generation_id": generation_id})
+
+    def count_knowledge(self) -> int:
+        if not self.collection.count():
+            return 0
+        rows = self.collection.get(
+            where=cast(Any, {"source_type": {"$in": ["document", "wiki"]}}),
+            include=[],
+        )
+        return len(rows.get("ids") or [])
 
     def search(
         self,

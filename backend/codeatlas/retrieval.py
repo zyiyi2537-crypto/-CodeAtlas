@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from typing import Any, cast
 
 from sqlalchemy import text
 from sqlmodel import Session, col, select
@@ -13,7 +14,7 @@ from .models import EmbeddingProfile, Repository, RepositoryAccess, User
 from .ranking import fuse_and_rerank, tokenize
 from .security import redact_secrets, resolve_repository_file
 from .settings import Settings
-from .vector_store import VectorStore
+from .vector_store import VectorStore, code_generation_namespace
 
 
 class CodeRetriever:
@@ -39,25 +40,32 @@ class CodeRetriever:
         scope_repository_ids: tuple[str, ...] | None = None,
     ) -> list[Repository]:
         with Session(self.engine) as session:
+            searchable = (
+                (col(Repository.status) == "ready")
+                | (
+                    (col(Repository.status) == "indexing")
+                    & col(Repository.active_generation_id).is_not(None)
+                )
+            )
             if scope_repository_ids is not None:
                 if not scope_repository_ids:
                     return []
                 return list(
                     session.exec(
                         select(Repository).where(
-                            Repository.status == "ready",
+                            searchable,
                             col(Repository.id).in_(scope_repository_ids),
                         )
                     )
                 )
             if user and user.role == "admin":
-                return list(session.exec(select(Repository).where(Repository.status == "ready")))
+                return list(session.exec(select(Repository).where(searchable)))
             if user:
                 grants = session.exec(
                     select(RepositoryAccess).where(RepositoryAccess.user_id == user.id)
                 ).all()
                 granted_ids = {grant.repository_id for grant in grants}
-                statement = select(Repository).where(Repository.status == "ready")
+                statement = select(Repository).where(searchable)
                 if granted_ids:
                     statement = statement.where(
                         (col(Repository.visibility) == "public")
@@ -67,7 +75,8 @@ class CodeRetriever:
                     statement = statement.where(Repository.visibility == "public")
                 return list(session.exec(statement))
             return list(session.exec(select(Repository).where(
-                Repository.status == "ready", Repository.visibility == "public"
+                searchable,
+                Repository.visibility == "public",
             )))
 
     def search(
@@ -96,9 +105,9 @@ class CodeRetriever:
             return []
         candidate_limit = 50
         embedding_settings, namespace = self._current_embedding_context()
-        vector_store = VectorStore(embedding_settings, namespace=namespace)
-        self.vector_store = vector_store
-        vector = vector_store.search(
+        vector = self._vector_candidates(
+            embedding_settings,
+            namespace,
             EmbeddingClient(embedding_settings).embed([query])[0],
             generation_ids,
             candidate_limit,
@@ -119,6 +128,84 @@ class CodeRetriever:
             [candidate for candidate in lexical if matches(candidate)],
             max(1, min(limit, 10)),
         )
+
+    def _vector_candidates(
+        self,
+        embedding_settings: Settings,
+        profile_namespace: str,
+        query_embedding: list[float],
+        generation_ids: list[str],
+        candidate_limit: int,
+    ) -> list[dict]:
+        profile_store = VectorStore(embedding_settings, namespace=profile_namespace)
+        self.vector_store = profile_store
+        candidates: list[dict] = []
+        legacy_generation_ids: list[str] = []
+        for generation_id in generation_ids:
+            generation_namespace = code_generation_namespace(
+                profile_namespace, generation_id
+            )
+            if profile_store.has_namespace(generation_namespace):
+                candidates.extend(
+                    VectorStore(
+                        embedding_settings, namespace=generation_namespace
+                    ).search(query_embedding, [generation_id], candidate_limit)
+                )
+            else:
+                legacy_generation_ids.append(generation_id)
+        if legacy_generation_ids:
+            candidates.extend(
+                profile_store.search(
+                    query_embedding,
+                    legacy_generation_ids,
+                    candidate_limit,
+                )
+            )
+        return sorted(
+            candidates,
+            key=lambda candidate: float(candidate.get("vector_score", 0)),
+            reverse=True,
+        )[:candidate_limit]
+
+    def vector_count(self) -> int:
+        embedding_settings, profile_namespace = self._current_embedding_context()
+        profile_store = VectorStore(embedding_settings, namespace=profile_namespace)
+        total = profile_store.count_knowledge()
+        with Session(self.engine) as session:
+            searchable = (
+                (col(Repository.status) == "ready")
+                | (
+                    (col(Repository.status) == "indexing")
+                    & col(Repository.active_generation_id).is_not(None)
+                )
+            )
+            generation_ids = [
+                repository.active_generation_id
+                for repository in session.exec(
+                    select(Repository).where(searchable)
+                ).all()
+                if repository.active_generation_id
+            ]
+        legacy_generation_ids: list[str] = []
+        for generation_id in generation_ids:
+            generation_namespace = code_generation_namespace(
+                profile_namespace, generation_id
+            )
+            if profile_store.has_namespace(generation_namespace):
+                total += VectorStore(
+                    embedding_settings, namespace=generation_namespace
+                ).count()
+            else:
+                legacy_generation_ids.append(generation_id)
+        if legacy_generation_ids:
+            rows = profile_store.collection.get(
+                where=cast(
+                    Any, {"generation_id": {"$in": legacy_generation_ids}}
+                ),
+                include=[],
+            )
+            total += len(rows.get("ids") or [])
+        return total
 
     def search_knowledge(
         self,

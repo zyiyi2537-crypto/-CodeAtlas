@@ -134,7 +134,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def ready():
         with Session(engine) as database:
             database.exec(select(IndexJob).limit(1)).first()
-        return {"status": "ready", "vector_chunks": retriever.vector_store.count()}
+        return {"status": "ready", "vector_chunks": retriever.vector_count()}
 
     app.mount("/mcp", mcp_http_app)
     return app

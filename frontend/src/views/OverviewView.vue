@@ -17,11 +17,13 @@ import { api } from '@/api'
 import EmptyState from '@/components/EmptyState.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import { formatDate, formatNumber } from '@/format'
+import { currentFailedJobs, latestJobsByRepository } from '@/overview'
 import type { IndexJob, Repository, Stats } from '@/types'
 
 const repositories = useQuery({
   queryKey: ['repositories'],
   queryFn: async () => (await api.get<Repository[]>('/repositories')).data,
+  refetchInterval: 5000,
 })
 const jobs = useQuery({
   queryKey: ['index-jobs'],
@@ -31,6 +33,7 @@ const jobs = useQuery({
 const stats = useQuery({
   queryKey: ['stats'],
   queryFn: async () => (await api.get<Stats>('/stats')).data,
+  refetchInterval: 5000,
 })
 
 const repositoryList = computed(() => repositories.data.value ?? [])
@@ -47,7 +50,8 @@ const readyRepositories = computed(() =>
 const activeJobs = computed(() =>
   jobList.value.filter((job) => job.status === 'queued' || job.status === 'running'),
 )
-const failedJobs = computed(() => jobList.value.filter((job) => job.status === 'failed').length)
+const failedJobs = computed(() => currentFailedJobs(jobList.value))
+const recentJobs = computed(() => latestJobsByRepository(jobList.value))
 const coverage = computed(() => {
   if (!repositoryList.value.length) return 0
   return Math.round((readyRepositories.value / repositoryList.value.length) * 100)
@@ -131,12 +135,12 @@ const maxLanguageChunks = computed(() =>
         <div v-else class="queue-idle">
           <CheckCircle2 :size="25" />
           <strong>队列已清空</strong>
-          <span>所有索引任务均已处理</span>
+          <span>当前没有排队或执行中的任务</span>
         </div>
 
         <div class="queue-foot">
           <span><i class="status-pin running" />{{ activeJobs.length }} 进行中</span>
-          <span><i class="status-pin failed" />{{ failedJobs }} 失败</span>
+          <span><i class="status-pin failed" />{{ failedJobs.length }} 当前异常</span>
         </div>
       </div>
     </section>
@@ -160,11 +164,11 @@ const maxLanguageChunks = computed(() =>
         <strong>{{ formatNumber(jobList.length) }}</strong>
         <small>INDEX RUNS</small>
       </div>
-      <div :class="{ warning: failedJobs > 0 }">
+      <div :class="{ warning: failedJobs.length > 0 }">
         <CircleAlert :size="17" />
         <span>需处理异常</span>
-        <strong>{{ failedJobs }}</strong>
-        <small>FAILED RUNS</small>
+        <strong>{{ failedJobs.length }}</strong>
+        <small>CURRENT FAILURES</small>
       </div>
     </section>
 
@@ -202,8 +206,8 @@ const maxLanguageChunks = computed(() =>
           </div>
           <RouterLink to="/jobs">查看全部</RouterLink>
         </div>
-        <div v-if="jobList.length" class="recent-run-list">
-          <RouterLink v-for="job in jobList.slice(0, 5)" :key="job.id" to="/jobs" class="recent-run">
+        <div v-if="recentJobs.length" class="recent-run-list">
+          <RouterLink v-for="job in recentJobs.slice(0, 5)" :key="job.id" to="/jobs" class="recent-run">
             <StatusBadge :status="job.status" />
             <div>
               <strong>{{ repositoryNames.get(job.repository_id) ?? job.repository_id.slice(0, 10) }}</strong>

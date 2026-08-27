@@ -18,7 +18,7 @@ from .models import (
 )
 from .repositories import remove_checkout, source_files, sync_repository
 from .settings import Settings
-from .vector_store import VectorStore
+from .vector_store import VectorStore, code_generation_namespace
 
 
 def now() -> datetime:
@@ -79,6 +79,7 @@ class IndexCoordinator:
         checkout_path = None
         embedding_settings = self.settings
         embedding_namespace = "default"
+        generation_vector_namespace = ""
         try:
             with Session(self.engine) as session:
                 job = session.get(IndexJob, job_id)
@@ -131,6 +132,9 @@ class IndexCoordinator:
                 session.add(job)
                 session.commit()
 
+            generation_vector_namespace = code_generation_namespace(
+                embedding_namespace, generation_id
+            )
             self._progress(job_id, 25, "Chunking source files")
             files = source_files(root, LANGUAGES, self.settings.max_source_files)
             chunks = []
@@ -140,7 +144,9 @@ class IndexCoordinator:
                 raise ValueError("repository contains no supported source files")
 
             self._progress(job_id, 45, f"Embedding {len(chunks)} code chunks")
-            store = VectorStore(embedding_settings, namespace=embedding_namespace)
+            store = VectorStore(
+                embedding_settings, namespace=generation_vector_namespace
+            )
             store.add_generation(chunks, EmbeddingClient(embedding_settings))
             self._progress(job_id, 80, "Activating search index")
             self._activate_generation(repository_id, generation_id, commit, str(root), chunks)
@@ -175,10 +181,26 @@ class IndexCoordinator:
                 session.add(repository)
                 session.add(job)
                 session.commit()
+            if previous_generation_id:
+                try:
+                    previous_namespace = code_generation_namespace(
+                        embedding_namespace, previous_generation_id
+                    )
+                    profile_store = VectorStore(
+                        embedding_settings, namespace=embedding_namespace
+                    )
+                    if profile_store.has_namespace(previous_namespace):
+                        profile_store.delete_namespace(previous_namespace)
+                    else:
+                        profile_store.delete_generation(previous_generation_id)
+                except Exception:
+                    pass
         except Exception as exc:
-            if generation_id:
+            if generation_id and generation_vector_namespace:
                 self._discard_generation(
-                    generation_id, embedding_settings, embedding_namespace
+                    generation_id,
+                    embedding_settings,
+                    generation_vector_namespace,
                 )
             if checkout_path is not None:
                 try:
@@ -230,12 +252,12 @@ class IndexCoordinator:
         self,
         generation_id: str,
         embedding_settings: Settings,
-        embedding_namespace: str,
+        generation_vector_namespace: str,
     ) -> None:
         try:
             VectorStore(
-                embedding_settings, namespace=embedding_namespace
-            ).delete_generation(generation_id)
+                embedding_settings, namespace=generation_vector_namespace
+            ).delete_namespace(generation_vector_namespace)
         except Exception:
             pass
         with Session(self.engine) as session:

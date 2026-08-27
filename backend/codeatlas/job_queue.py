@@ -37,6 +37,7 @@ class IndexJobQueue:
         request: JobRequest,
         *,
         skip_if_active: bool = False,
+        skip_if_latest_commit: bool = False,
     ) -> IndexJob | None:
         repository = session.exec(
             select(Repository).where(Repository.id == request.repository_id).with_for_update()
@@ -55,6 +56,15 @@ class IndexJobQueue:
                 return None
             raise ActiveIndexJobError(request.repository_id)
 
+        if skip_if_latest_commit and request.commit:
+            latest_commit = session.exec(
+                select(IndexJob.commit)
+                .where(IndexJob.repository_id == request.repository_id)
+                .order_by(col(IndexJob.created_at).desc(), col(IndexJob.id).desc())
+            ).first()
+            if latest_commit == request.commit:
+                return None
+
         job = IndexJob(
             repository_id=request.repository_id,
             created_by=request.created_by,
@@ -65,9 +75,20 @@ class IndexJobQueue:
         session.flush()
         return job
 
-    def enqueue(self, request: JobRequest, *, skip_if_active: bool = False) -> IndexJob | None:
+    def enqueue(
+        self,
+        request: JobRequest,
+        *,
+        skip_if_active: bool = False,
+        skip_if_latest_commit: bool = False,
+    ) -> IndexJob | None:
         with Session(self.engine) as session:
-            job = self.add(session, request, skip_if_active=skip_if_active)
+            job = self.add(
+                session,
+                request,
+                skip_if_active=skip_if_active,
+                skip_if_latest_commit=skip_if_latest_commit,
+            )
             session.commit()
             if job is None:
                 return None
