@@ -1,7 +1,8 @@
 # CodeAtlas Restore Runbook
 
 The backup intentionally excludes Git worktrees and logs. Restore MySQL, Chroma,
-original document bytes, blog Markdown, environment configuration, and the repository manifest.
+original document bytes, the provider-credential encryption key, blog Markdown,
+environment configuration, and the repository manifest.
 
 1. Verify the archive before extracting:
 
@@ -21,7 +22,10 @@ original document bytes, blog Markdown, environment configuration, and the repos
    contains its SQLAlchemy URL. Generate a temporary MySQL client option file,
    then import `codeatlas.sql`. Keep that option file mode `0600` and delete it
    immediately after the import. Restore both `chroma` and `documents` into
-   `/var/lib/codeatlas`, then
+   `/var/lib/codeatlas`. Restore `provider-credentials.key` as
+   `/var/lib/codeatlas/.llm-config.key` with owner `codeatlas:codeatlas` and mode
+   `0600`; without the original key, encrypted LLM and Embedding credentials are
+   unrecoverable. Then
    set ownership to `codeatlas:codeatlas` and mode `0750` on directories.
 
    The client option file must contain the decoded credentials from

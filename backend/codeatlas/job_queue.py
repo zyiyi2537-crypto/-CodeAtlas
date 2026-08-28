@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from sqlmodel import Session, col, select
 
+from .index_job_schedule_lock import index_job_schedule_lock
 from .models import IndexJob, Repository
 
 
@@ -82,20 +83,21 @@ class IndexJobQueue:
         skip_if_active: bool = False,
         skip_if_latest_commit: bool = False,
     ) -> IndexJob | None:
-        with Session(self.engine) as session:
-            job = self.add(
-                session,
-                request,
-                skip_if_active=skip_if_active,
-                skip_if_latest_commit=skip_if_latest_commit,
-            )
-            session.commit()
-            if job is None:
-                return None
-            session.refresh(job)
-            job_id = job.id
-        self.submit((job_id,))
-        return job
+        with index_job_schedule_lock(self.engine):
+            with Session(self.engine) as session:
+                job = self.add(
+                    session,
+                    request,
+                    skip_if_active=skip_if_active,
+                    skip_if_latest_commit=skip_if_latest_commit,
+                )
+                session.commit()
+                if job is None:
+                    return None
+                session.refresh(job)
+                job_id = job.id
+            self.submit((job_id,))
+            return job
 
     def submit(self, job_ids: tuple[str, ...] | list[str]) -> None:
         if self.submit_job is None:

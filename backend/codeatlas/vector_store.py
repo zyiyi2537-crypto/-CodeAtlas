@@ -42,6 +42,58 @@ def code_generation_namespace(profile_namespace: str, generation_id: str) -> str
     return f"{profile_namespace}:code:{generation_id}"
 
 
+def _profile_collections(settings: Settings, profile_namespace: str) -> list[Any]:
+    settings.chroma_path.mkdir(parents=True, exist_ok=True)
+    client = chromadb.PersistentClient(path=str(settings.chroma_path))
+    prefix = f"{profile_namespace}:code:"
+    return [
+        collection
+        for collection in client.list_collections()
+        if str((collection.metadata or {}).get("embedding_namespace", ""))
+        == profile_namespace
+        or str((collection.metadata or {}).get("embedding_namespace", "")).startswith(
+            prefix
+        )
+    ]
+
+
+def profile_contains_generation(
+    settings: Settings,
+    profile_namespace: str,
+    generation_ids: list[str],
+) -> bool:
+    if not generation_ids:
+        return False
+    generation_namespaces = {
+        code_generation_namespace(profile_namespace, generation_id)
+        for generation_id in generation_ids
+    }
+    for collection in _profile_collections(settings, profile_namespace):
+        namespace = str((collection.metadata or {}).get("embedding_namespace", ""))
+        if namespace in generation_namespaces:
+            return True
+        if namespace == profile_namespace and collection.count():
+            for generation_id in generation_ids:
+                rows = collection.get(
+                    where={"generation_id": generation_id},
+                    include=[],
+                )
+                if rows.get("ids"):
+                    return True
+    return False
+
+
+def delete_profile_collections(settings: Settings, profile_namespace: str) -> int:
+    client = chromadb.PersistentClient(path=str(settings.chroma_path))
+    names = [
+        collection.name
+        for collection in _profile_collections(settings, profile_namespace)
+    ]
+    for name in names:
+        client.delete_collection(name)
+    return len(names)
+
+
 class VectorStore:
     def __init__(self, settings: Settings, namespace: str = "default"):
         self.settings = settings

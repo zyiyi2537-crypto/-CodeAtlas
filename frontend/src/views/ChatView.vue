@@ -1,12 +1,30 @@
 <script setup lang="ts">
 import { useMutation, useQuery, useQueryClient } from '@tanstack/vue-query'
-import { Bot, FileCode, Plus, RefreshCw, SendHorizonal, Settings2, Sparkles, UserRound, X } from 'lucide-vue-next'
+import {
+  Bot,
+  FileCode,
+  Pencil,
+  Plus,
+  RefreshCw,
+  SendHorizonal,
+  Settings2,
+  Sparkles,
+  TestTube2,
+  Trash2,
+  UserRound,
+  X,
+} from 'lucide-vue-next'
 import { computed, nextTick, reactive, ref } from 'vue'
 
 import { api, errorMessage } from '@/api'
 import { csrfHeaders, useAuth } from '@/auth'
 import CodePreview from '@/components/CodePreview.vue'
 import EmptyState from '@/components/EmptyState.vue'
+import {
+  buildLlmProviderPayload,
+  buildLlmSyncPayload,
+  createLlmProviderForm,
+} from '@/providerCredentials'
 import type {
   ChatCitation,
   ChatResponse,
@@ -39,11 +57,14 @@ const repositoryId = ref('')
 const previewResult = ref<SearchResult | null>(null)
 const messageList = ref<HTMLElement | null>(null)
 const showModelSettings = ref(false)
+const editingProviderId = ref('')
+const editingProviderActive = ref(false)
+const editingKeyConfigured = ref(false)
 const modelError = ref('')
 const syncedModels = ref<LlmModel[]>([])
 const { isAdmin } = useAuth()
 const queryClient = useQueryClient()
-const providerForm = reactive({ name: '', base_url: '', api_key: '', model: '' })
+const providerForm = reactive(createLlmProviderForm())
 
 const providers = useQuery({
   queryKey: ['llm-providers'],
@@ -54,11 +75,12 @@ const providers = useQuery({
 const syncModels = useMutation({
   mutationFn: async () => (await api.post<{ models: LlmModel[]; count: number }>(
     '/llm/providers/sync',
-    { base_url: providerForm.base_url, api_key: providerForm.api_key },
+    buildLlmSyncPayload(providerForm, editingProviderId.value || undefined),
     { headers: csrfHeaders() },
   )).data,
   onSuccess: (data) => {
     syncedModels.value = data.models
+    providerForm.models = data.models
     if (!providerForm.model && data.models[0]) providerForm.model = data.models[0].id
     modelError.value = data.count ? '' : '上游没有返回可用模型'
   },
@@ -66,15 +88,25 @@ const syncModels = useMutation({
 })
 
 const saveProvider = useMutation({
-  mutationFn: async () => (await api.post<LlmProvider>('/llm/providers', {
-    ...providerForm,
-    models: syncedModels.value,
-  }, { headers: csrfHeaders() })).data,
+  mutationFn: async () => {
+    const payload = buildLlmProviderPayload(providerForm)
+    return editingProviderId.value
+      ? (await api.patch<LlmProvider>(
+          `/llm/providers/${editingProviderId.value}`,
+          payload,
+          { headers: csrfHeaders() },
+        )).data
+      : (await api.post<LlmProvider>(
+          '/llm/providers',
+          payload,
+          { headers: csrfHeaders() },
+        )).data
+  },
   onSuccess: async (provider) => {
-    await api.post(`/llm/providers/${provider.id}/activate`, null, { headers: csrfHeaders() })
-    showModelSettings.value = false
-    Object.assign(providerForm, { name: '', base_url: '', api_key: '', model: '' })
-    syncedModels.value = []
+    if (!editingProviderId.value) {
+      await api.post(`/llm/providers/${provider.id}/activate`, null, { headers: csrfHeaders() })
+    }
+    resetProviderForm()
     await queryClient.invalidateQueries({ queryKey: ['llm-providers'] })
     await chatStatus.refetch()
   },
@@ -85,6 +117,32 @@ const activateProvider = useMutation({
   mutationFn: async (id: string) => (await api.post(`/llm/providers/${id}/activate`, null, { headers: csrfHeaders() })).data,
   onSuccess: async () => { await chatStatus.refetch(); await queryClient.invalidateQueries({ queryKey: ['llm-providers'] }) },
   onError: (error) => { modelError.value = errorMessage(error) },
+})
+
+const testProvider = useMutation({
+  mutationFn: async (id: string) =>
+    (await api.post<{ models: LlmModel[]; count: number }>(
+      `/llm/providers/${id}/test`,
+      null,
+      { headers: csrfHeaders() },
+    )).data,
+  onSuccess: async (data) => {
+    syncedModels.value = data.models
+    providerForm.models = data.models
+    modelError.value = data.count ? '' : '上游没有返回可用模型'
+    await queryClient.invalidateQueries({ queryKey: ['llm-providers'] })
+  },
+  onError: (cause) => { modelError.value = errorMessage(cause) },
+})
+
+const deleteProvider = useMutation({
+  mutationFn: async (id: string) =>
+    api.delete(`/llm/providers/${id}`, { headers: csrfHeaders() }),
+  onSuccess: async () => {
+    resetProviderForm()
+    await queryClient.invalidateQueries({ queryKey: ['llm-providers'] })
+  },
+  onError: (cause) => { modelError.value = errorMessage(cause) },
 })
 
 const suggestionPrompts = [
@@ -162,7 +220,35 @@ function openCitation(citation: ChatCitation) {
 
 function openModelSettings() {
   modelError.value = ''
+  resetProviderForm()
   showModelSettings.value = true
+}
+
+function resetProviderForm() {
+  editingProviderId.value = ''
+  editingProviderActive.value = false
+  editingKeyConfigured.value = false
+  Object.assign(providerForm, createLlmProviderForm())
+  syncedModels.value = []
+}
+
+function editProvider(provider: LlmProvider) {
+  editingProviderId.value = provider.id
+  editingProviderActive.value = provider.is_active
+  editingKeyConfigured.value = provider.api_key_configured
+  Object.assign(providerForm, createLlmProviderForm(provider))
+  syncedModels.value = [...provider.models]
+  modelError.value = ''
+}
+
+function removeProvider(provider: LlmProvider) {
+  if (provider.is_active || !window.confirm(`删除 LLM 配置“${provider.name}”？`)) return
+  deleteProvider.mutate(provider.id)
+}
+
+function closeModelSettings() {
+  showModelSettings.value = false
+  resetProviderForm()
 }
 </script>
 
@@ -188,7 +274,7 @@ function openModelSettings() {
     </section>
 
     <div v-if="chatStatus.data.value && !chatStatus.data.value.enabled" class="error-banner">
-      问答服务未配置。管理员需要在后端设置 CODEATLAS_LLM_BASE_URL 与 CODEATLAS_LLM_API_KEY 后重启服务。
+      问答服务未配置。管理员可点击“模型配置”，通过 HTTPS 添加、测试并启用 LLM 服务。
     </div>
 
     <section ref="messageList" class="chat-thread">
@@ -292,29 +378,50 @@ function openModelSettings() {
       @close="previewResult = null"
     />
 
-    <div v-if="showModelSettings" class="preview-backdrop" role="presentation" @click.self="showModelSettings = false">
+    <div v-if="showModelSettings" class="preview-backdrop" role="presentation" @click.self="closeModelSettings">
       <section class="form-dialog" role="dialog" aria-modal="true" aria-label="模型配置">
         <header class="dialog-header">
           <div class="dialog-title"><Settings2 :size="20" /><h2>模型配置</h2></div>
-          <button class="icon-button" type="button" aria-label="关闭" @click="showModelSettings = false"><X :size="18" /></button>
+          <button class="icon-button" type="button" aria-label="关闭" @click="closeModelSettings"><X :size="18" /></button>
         </header>
         <div class="stack-form">
-          <label><span>配置名称（可选）</span><input v-model="providerForm.name" placeholder="DeepSeek / Kimi / 本地模型" /></label>
+          <label><span>配置名称</span><input v-model="providerForm.name" placeholder="DeepSeek / Kimi / 本地模型" /></label>
           <label><span>OpenAI 兼容 Base URL</span><input v-model="providerForm.base_url" type="url" required placeholder="https://api.example.com/v1" /></label>
-          <label><span>API Key</span><input v-model="providerForm.api_key" type="password" autocomplete="new-password" placeholder="仅保存加密后的密文" /></label>
+          <label>
+            <span>{{ editingKeyConfigured ? '替换 API Key（留空保留原值）' : 'API Key' }}</span>
+            <input
+              v-model="providerForm.api_key"
+              type="password"
+              autocomplete="new-password"
+              :placeholder="editingKeyConfigured ? '留空则继续使用已保存密钥' : '经 HTTPS 提交并加密保存'"
+              @input="providerForm.clear_api_key = false"
+            />
+          </label>
+          <label v-if="editingProviderId && editingKeyConfigured && !editingProviderActive" class="check-row">
+            <input v-model="providerForm.clear_api_key" type="checkbox" @change="providerForm.api_key = ''" />
+            <span>明确清除数据库中加密保存的 API Key</span>
+          </label>
           <div class="form-row">
             <label class="grow"><span>模型</span><select v-if="syncedModels.length" v-model="providerForm.model"><option v-for="model in syncedModels" :key="model.id" :value="model.id">{{ model.name }}（{{ model.id }}）</option></select><input v-else v-model="providerForm.model" required placeholder="deepseek-chat" /></label>
-            <button class="secondary-button form-inline-button" type="button" :disabled="syncModels.isPending.value || !providerForm.base_url" @click="syncModels.mutate()"><RefreshCw :size="16" :class="{ spin: syncModels.isPending.value }" />同步上游模型</button>
+            <button class="secondary-button form-inline-button" type="button" :disabled="syncModels.isPending.value || !providerForm.base_url || (!providerForm.api_key && !editingKeyConfigured)" @click="syncModels.mutate()"><RefreshCw :size="16" :class="{ spin: syncModels.isPending.value }" />同步上游模型</button>
           </div>
           <div v-if="modelError" class="error-banner">{{ modelError }}</div>
-          <p class="form-hint">通过上游的 <code>GET /models</code> 自动读取模型。API Key 只发送到 CodeAtlas 后端，不会回显。</p>
-          <div class="form-actions"><button class="secondary-button" type="button" @click="showModelSettings = false">取消</button><button class="command-button" type="button" :disabled="saveProvider.isPending.value || !providerForm.base_url || !providerForm.api_key || !providerForm.model" @click="saveProvider.mutate()"><Plus :size="16" />保存并切换</button></div>
+          <p class="form-hint">API Key 只通过 HTTPS 发送到 CodeAtlas 后端并使用 Fernet 加密。留空不会清除已保存密钥，接口和前端永不回显明文。</p>
+          <div class="form-actions">
+            <button class="secondary-button" type="button" @click="resetProviderForm">新建配置</button>
+            <button v-if="editingProviderId" class="secondary-button" type="button" :disabled="testProvider.isPending.value || !editingKeyConfigured" @click="testProvider.mutate(editingProviderId)"><TestTube2 :size="16" />测试已保存配置</button>
+            <button class="command-button" type="button" :disabled="saveProvider.isPending.value || !providerForm.base_url || (!editingProviderId && !providerForm.api_key) || !providerForm.model" @click="saveProvider.mutate()"><Plus :size="16" />{{ editingProviderId ? '保存修改' : '保存并切换' }}</button>
+          </div>
         </div>
         <section v-if="providers.data.value?.length" class="model-provider-list">
           <h3>已保存配置</h3>
           <div v-for="provider in providers.data.value" :key="provider.id" class="model-provider-row">
-            <span><strong>{{ provider.name }}</strong><small>{{ provider.model }} · {{ provider.base_url }}</small></span>
-            <button class="secondary-button" type="button" :disabled="provider.is_active || activateProvider.isPending.value" @click="activateProvider.mutate(provider.id)">{{ provider.is_active ? '当前使用' : '切换' }}</button>
+            <span><strong>{{ provider.name }}</strong><small>{{ provider.model }} · {{ provider.base_url }} · {{ provider.api_key_configured ? '密钥已配置' : '密钥未配置' }}</small></span>
+            <span class="heading-actions">
+              <button class="icon-button" type="button" :aria-label="`编辑 ${provider.name}`" @click="editProvider(provider)"><Pencil :size="15" /></button>
+              <button class="secondary-button" type="button" :disabled="provider.is_active || !provider.api_key_configured || activateProvider.isPending.value" @click="activateProvider.mutate(provider.id)">{{ provider.is_active ? '当前使用' : '切换' }}</button>
+              <button v-if="!provider.is_active" class="icon-button danger" type="button" :aria-label="`删除 ${provider.name}`" :disabled="deleteProvider.isPending.value" @click="removeProvider(provider)"><Trash2 :size="15" /></button>
+            </span>
           </div>
         </section>
       </section>

@@ -4,8 +4,12 @@ import secrets
 from pathlib import Path
 
 import httpx
-from cryptography.fernet import Fernet, InvalidToken
 
+from .credential_crypto import (
+    CredentialEncryptionError,
+    decrypt_secret,
+    encrypt_secret,
+)
 from .models import LlmProvider
 
 
@@ -13,36 +17,18 @@ class LlmProviderError(RuntimeError):
     """Raised when an LLM provider configuration or upstream call is invalid."""
 
 
-def _fernet(data_dir: Path) -> Fernet:
-    key_path = data_dir / ".llm-config.key"
-    try:
-        key = key_path.read_bytes().strip()
-    except FileNotFoundError:
-        key = Fernet.generate_key()
-        key_path.write_bytes(key)
-    try:
-        key_path.chmod(0o600)
-    except OSError:
-        pass
-    try:
-        return Fernet(key)
-    except (ValueError, TypeError) as exc:
-        raise LlmProviderError("LLM encryption key is invalid") from exc
-
-
 def encrypt_api_key(data_dir: Path, api_key: str) -> str:
-    return _fernet(data_dir).encrypt(api_key.encode("utf-8")).decode("ascii")
+    try:
+        return encrypt_secret(data_dir, api_key)
+    except CredentialEncryptionError as exc:
+        raise LlmProviderError(str(exc)) from exc
 
 
 def decrypt_api_key(data_dir: Path, provider: LlmProvider) -> str:
-    if not provider.api_key_ciphertext:
-        return ""
     try:
-        return _fernet(data_dir).decrypt(
-            provider.api_key_ciphertext.encode("ascii")
-        ).decode("utf-8")
-    except (InvalidToken, UnicodeDecodeError, ValueError) as exc:
-        raise LlmProviderError("stored LLM API key cannot be decrypted") from exc
+        return decrypt_secret(data_dir, provider.api_key_ciphertext)
+    except CredentialEncryptionError as exc:
+        raise LlmProviderError(str(exc)) from exc
 
 
 def normalize_base_url(value: str) -> str:

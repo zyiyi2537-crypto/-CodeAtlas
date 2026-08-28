@@ -60,9 +60,21 @@ sudo -u codeatlas -E /opt/codeatlas/backend/.venv/bin/codeatlas index-demo
 ## Upgrade
 
 Build `frontend/dist` and `blog/dist` outside the server. Upload a complete
-release directory, then run `deploy/install.sh`. The installer preserves an
-existing `/etc/codeatlas/codeatlas.env`, runs Alembic through `ExecStartPre`,
-tests Nginx configuration, and restarts only CodeAtlas and Nginx.
+release directory. Before running `deploy/install.sh`, set
+`CODEATLAS_PUBLIC_ORIGIN` to the canonical HTTPS origin, set
+`CODEATLAS_COOKIE_SECURE=true`, include the domain in
+`CODEATLAS_MCP_ALLOWED_HOSTS`, and provision the matching certificate under
+`/etc/letsencrypt/live/<domain>/`. A first installation can obtain the
+certificate with an ACME standalone challenge before starting the application;
+an existing installation should keep its normal webroot renewal flow.
+
+The installer fails before copying or migrating the application when those
+HTTPS prerequisites are absent. It preserves an existing production Nginx
+configuration only after validating that the canonical domain has a TLS server,
+port 80 provides ACME and redirects, and any port 8080 compatibility listener is
+redirect-only. It removes the retired IP-allowlist include, validates the
+candidate with both `deploy/validate_nginx.py` and `nginx -t`, and restores the
+previous Nginx file if native validation fails.
 
 ## Backup
 
@@ -72,6 +84,7 @@ represent the same index state, then creates a SHA-256 protected archive under
 
 - a consistent MySQL logical dump;
 - Chroma persistent data;
+- the provider-credential encryption key when present;
 - blog Markdown when present on the server;
 - the environment file;
 - a JSON repository manifest.
@@ -79,15 +92,23 @@ represent the same index state, then creates a SHA-256 protected archive under
 Git caches, worktrees and all logs are excluded because they are reproducible.
 Backups are never automatically deleted.
 
-## Pre-domain Access
+## Domain and HTTPS access
 
-`/etc/nginx/snippets/codeatlas-allowlist.conf` permits only loopback and the
-administrator public IP. Update it and run `nginx -t && systemctl reload nginx`
-when the IP changes. Before ICP filing, Nginx also listens on port `8080` because
-mainland providers may intercept public HTTP traffic on ports 80 and 443. The
-temporary URL should use an administrator-controlled hostname or IP and its
-security-group rule must remain restricted to the administrator IP. Do not
-commit the real server address to the repository. After ICP filing, remove the
-8080 listener, bind the domain on ports 80 and 443, add a certificate, set
-`CODEATLAS_PUBLIC_ORIGIN` to the HTTPS origin and enable
-`CODEATLAS_COOKIE_SECURE=true`.
+Expose the application through its registered domain on ports 80 and 443. Port
+80 serves only ACME HTTP-01 challenges and redirects to the canonical HTTPS
+origin. Redirect `www` and any retired IP/port entry point to the same origin.
+Set `CODEATLAS_PUBLIC_ORIGIN` to that HTTPS origin and enable
+`CODEATLAS_COOKIE_SECURE=true`; include the domain in
+`CODEATLAS_MCP_ALLOWED_HOSTS`. The site is publicly reachable, while login,
+administrator authorization, CSRF, API-token scopes, MCP bearer tokens and rate
+limits continue to protect privileged operations. Keep certificate renewal and
+an Nginx reload deploy hook enabled. Do not commit the real server address or
+certificate private key to the repository.
+
+After HTTPS and secure cookies are verified, administrators may manage LLM and
+Embedding provider API keys through the browser. Keys are write-only, encrypted
+with the protected data-directory Fernet key, and never returned by the API or
+included in audit detail. Back up the encryption-key file with the environment
+and database; losing it makes encrypted provider credentials unrecoverable.
+Leaving an edit field blank keeps the existing key. Clearing is an explicit
+action, and active configurations cannot be deleted or lose their only key.

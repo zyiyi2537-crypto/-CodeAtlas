@@ -149,9 +149,9 @@ scheduled scans, skip unchanged revisions, preserve original bytes and provider
 provenance, and reuse the same structure-first document parsing, MySQL truth,
 Chroma projection and cited RAG path as manual uploads.
 
-The browser accepts only an opaque `credential_ref`; it never accepts or returns
-cloud secrets. Install the corresponding JSON bundle in the protected service
-environment, for example:
+External document connectors continue to accept only an opaque `credential_ref`;
+they never accept or return cloud secrets. Install the corresponding JSON bundle
+in the protected service environment, for example:
 
 ```env
 CODEATLAS_CREDENTIAL_AWS_DOCS='{"access_key_id":"...","secret_access_key":"..."}'
@@ -174,10 +174,19 @@ object-store VersionId/DeleteMarker ingestion remain later enhancements.
 
 ## Deployment
 
-The current pre-domain deployment binds Uvicorn to `127.0.0.1:8010` and exposes
-Nginx on port 80 through an administrator IP allowlist. `systemd` enforces one
-worker, a 550 MB soft memory limit and a 700 MB hard limit. Logs stay in
+The production deployment binds Uvicorn to `127.0.0.1:8010` and exposes the
+application through the configured HTTPS domain. Browser sessions, CSRF,
+administrator authorization, API tokens and MCP bearer tokens protect privileged
+operations; public reachability does not bypass those controls. `systemd` enforces
+one worker, a 550 MB soft memory limit and a 700 MB hard limit. Logs stay in
 `journald`; they are excluded from backups.
+
+`deploy/install.sh` is HTTPS-only and fails closed. Configure the canonical
+HTTPS origin, secure cookies, MCP host and matching certificate before running
+it. Port 80 is limited to ACME HTTP-01 plus HTTPS redirects; an optional legacy
+port 8080 listener may redirect only and cannot serve or proxy CodeAtlas. Existing
+Nginx configurations are validated and the retired IP-allowlist include is
+removed rather than silently retained.
 
 See [deploy/RESTORE.md](deploy/RESTORE.md) and
 [docs/operations.md](docs/operations.md) before migrating or restoring data.
@@ -201,22 +210,24 @@ deployment upgrade, run `alembic upgrade head` before creating GitHub sources.
 
 ### Embedding model switching
 
-Administrators can add an OpenAI-compatible embedding profile from the
-`Embedding 模型` page and click `设为当前`. The form defaults to SiliconFlow's
-hosted `BAAI/bge-m3` (`https://api.siliconflow.cn/v1`, 1024 dimensions). The
-page field `credential_ref` is only a server-side reference; never paste an API
-key into the browser. Configure the matching secret in the service environment:
+Administrators can create, edit, test, activate and delete inactive embedding
+profiles from the `Embedding 模型` page. The form defaults to SiliconFlow's hosted
+`BAAI/bge-m3` (`https://api.siliconflow.cn/v1`, 1024 dimensions). On a verified
+HTTPS deployment, an administrator may submit a write-only API key; CodeAtlas
+encrypts it with the server-side Fernet key and never returns it. A protected
+service-environment credential remains available as a fallback:
 
 ```env
 CODEATLAS_CREDENTIAL_SILICONFLOW_EMBEDDING=your-real-key
 ```
 
-After configuring the API key, probe the dimension and confirm it returns 1024
-before saving and activating the profile. Activation validates the server-side
-credential, queues re-index jobs for existing repositories, and rebuilds
-document and Wiki vectors. Profiles without a configured server credential
-cannot be activated. Example environments keep `hash` as a safe startup
-fallback when no third-party key is installed.
+Blank API-key fields preserve an existing encrypted key; clearing requires an
+explicit action and active profiles cannot lose their only credential. Probe the
+dimension and confirm it returns 1024 before activation. Activation validates the
+credential, queues re-index jobs for existing repositories, and rebuilds document
+and Wiki vectors. Active vector settings cannot be edited in place because that
+would mix incompatible vectors. Example environments keep `hash` as a safe
+startup fallback when no third-party key is installed.
 
 ## Security Model
 

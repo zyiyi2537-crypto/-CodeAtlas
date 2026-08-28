@@ -73,6 +73,9 @@ fi
 if [[ -d "$DATA_DIR/documents" ]]; then
   cp -a "$DATA_DIR/documents" "$STAGE/documents"
 fi
+if [[ -f "$DATA_DIR/.llm-config.key" ]]; then
+  install -m 0600 "$DATA_DIR/.llm-config.key" "$STAGE/provider-credentials.key"
+fi
 if [[ -d "$APP_DIR/blog/src/content" ]]; then
   install -d "$STAGE/blog"
   cp -a "$APP_DIR/blog/src/content" "$STAGE/blog/content"

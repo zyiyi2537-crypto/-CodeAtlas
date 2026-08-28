@@ -174,6 +174,7 @@ class EmbeddingProfile(SQLModel, table=True):
     model: str = Field(max_length=200)
     dimension: int
     credential_ref: str = Field(max_length=200)
+    api_key_ciphertext: str = Field(default="", sa_column=Column(Text, nullable=False))
     backend: str = Field(default="chroma", max_length=30)
     provider: str = Field(default="openai", max_length=40)
     is_active: bool = Field(default=False, index=True)

@@ -5,8 +5,11 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from threading import Event, Thread
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlmodel import Session, select
 
 from .api import router
@@ -117,11 +120,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.gitlab_sync = gitlab_sync
     app.state.github_sync = github_sync
     app.state.fastmcp = fastmcp
+
+    @app.exception_handler(RequestValidationError)
+    async def redact_validation_input(
+        _request: Request, exception: RequestValidationError
+    ) -> JSONResponse:
+        errors = []
+        for error in exception.errors():
+            sanitized = dict(error)
+            sanitized.pop("input", None)
+            errors.append(sanitized)
+        return JSONResponse(
+            status_code=422,
+            content=jsonable_encoder({"detail": errors}),
+        )
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[settings.public_origin],
         allow_credentials=True,
-        allow_methods=["GET", "POST", "PUT", "DELETE"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
         allow_headers=["Content-Type", "X-CSRF-Token", "Authorization"],
     )
     app.include_router(router)

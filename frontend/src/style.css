@@ -792,6 +792,21 @@ textarea:focus {
   gap: 16px;
 }
 
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.check-row input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  margin: 0;
+}
+
 .two-column-form {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
@@ -1667,6 +1682,13 @@ fieldset small {
 .model-provider-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 0; border-bottom: 1px solid var(--line); }
 .model-provider-row span { display: grid; gap: 3px; min-width: 0; }
 .model-provider-row small { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-provider-row .heading-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: nowrap;
+  gap: 8px;
+}
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 

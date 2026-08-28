@@ -1,4 +1,0 @@
-allow 127.0.0.1;
-allow ::1;
-allow ADMIN_PUBLIC_IP;
-deny all;

@@ -5,12 +5,14 @@ import os
 import threading
 import time
 from collections import defaultdict, deque
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 
 import httpx
-from fastapi import APIRouter, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlmodel import Session, col, select
@@ -25,7 +27,12 @@ from .auth import (
 )
 from .chat import ChatService, ChatUnavailableError
 from .connectors import credential_environment_name, validate_public_https_base_url
+from .credential_crypto import CredentialEncryptionError, encrypt_secret
 from .documents import chunk_document, extract_structured_blocks
+from .embedding_profile_lock import (
+    EmbeddingProfileLockError,
+    embedding_profile_lock,
+)
 from .embeddings import (
     EmbeddingClient,
     embedding_credential_name,
@@ -41,6 +48,10 @@ from .github import (
     resolve_deploy_key,
 )
 from .gitlab import GitLabClient, GitLabClientError
+from .index_job_schedule_lock import (
+    IndexJobScheduleLockError,
+    index_job_schedule_lock,
+)
 from .job_queue import ActiveIndexJobError, JobRequest
 from .llm_config import (
     LlmProviderError,
@@ -50,6 +61,7 @@ from .llm_config import (
     normalize_base_url,
     sync_models,
 )
+from .llm_provider_lock import LlmProviderLockError, llm_provider_lock
 from .models import (
     ApiToken,
     AuditEvent,
@@ -68,6 +80,7 @@ from .models import (
     User,
     UserSession,
     WikiPage,
+    new_id,
     utc_now,
 )
 from .security import (
@@ -83,31 +96,131 @@ from .security import (
     validate_repository_name,
     verify_password,
 )
-from .vector_store import VectorStore
+from .vector_store import (
+    VectorStore,
+    delete_profile_collections,
+    profile_contains_generation,
+)
 
 login_attempts: dict[str, list[float]] = {}
+login_ip_attempts: dict[str, list[float]] = {}
+login_attempts_lock = threading.Lock()
 LOGIN_LIMIT = 5
+LOGIN_IP_LIMIT = 20
 LOGIN_WINDOW = 300
+MAX_LOGIN_IDENTIFIERS = 10_000
+MAX_CONCURRENT_LOGIN_VERIFICATIONS = 2
+active_login_verifications = 0
+active_login_ips: set[str] = set()
+DUMMY_PASSWORD_HASH = (
+    "$argon2id$v=19$m=65536,t=3,p=2$Vsv1tXmyXuV69wZ5pQfAkQ$"
+    "RYCMsSBrtS7PjMRGsY11r5XtYvRreCGelXMm++IFlbU"
+)
 
 
-def check_login_rate_limit(identifier: str) -> None:
-    now = time.time()
-    attempts = login_attempts.get(identifier, [])
-    attempts = [t for t in attempts if now - t < LOGIN_WINDOW]
-    if len(attempts) >= LOGIN_LIMIT:
+def _prune_login_attempts(store: dict[str, list[float]], now: float) -> None:
+    expired = [
+        key
+        for key, values in store.items()
+        if not values or now - values[-1] >= LOGIN_WINDOW
+    ]
+    for key in expired:
+        store.pop(key, None)
+
+
+def _active_login_attempts(
+    store: dict[str, list[float]], identifier: str, now: float
+) -> list[float]:
+    attempts = store.get(identifier, [])
+    attempts = [timestamp for timestamp in attempts if now - timestamp < LOGIN_WINDOW]
+    if attempts:
+        store[identifier] = attempts
+    else:
+        store.pop(identifier, None)
+    return attempts
+
+
+def _record_login_attempt(
+    store: dict[str, list[float]],
+    identifier: str,
+    attempts: list[float],
+    now: float,
+) -> None:
+    if identifier not in store and len(store) >= MAX_LOGIN_IDENTIFIERS:
+        oldest = min(store, key=lambda key: store[key][-1])
+        store.pop(oldest, None)
+    store[identifier] = [*attempts, now]
+
+
+def _check_and_record_login_attempt(
+    store: dict[str, list[float]], identifier: str, limit: int, now: float
+) -> None:
+    attempts = _active_login_attempts(store, identifier, now)
+    if len(attempts) >= limit:
         raise HTTPException(
             status.HTTP_429_TOO_MANY_REQUESTS,
             "Too many login attempts. Please try again later.",
         )
-    attempts.append(now)
-    login_attempts[identifier] = attempts
+    _record_login_attempt(store, identifier, attempts, now)
+
+
+def check_login_rate_limit(identifier: str) -> None:
+    now = time.time()
+    with login_attempts_lock:
+        _prune_login_attempts(login_attempts, now)
+        _check_and_record_login_attempt(login_attempts, identifier, LOGIN_LIMIT, now)
+
+
+def check_login_rate_limits(account_identifier: str, ip_identifier: str) -> None:
+    now = time.time()
+    with login_attempts_lock:
+        _prune_login_attempts(login_attempts, now)
+        _prune_login_attempts(login_ip_attempts, now)
+        account_attempts = _active_login_attempts(
+            login_attempts, account_identifier, now
+        )
+        ip_attempts = _active_login_attempts(login_ip_attempts, ip_identifier, now)
+        if len(account_attempts) >= LOGIN_LIMIT or len(ip_attempts) >= LOGIN_IP_LIMIT:
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                "Too many login attempts. Please try again later.",
+            )
+        _record_login_attempt(login_attempts, account_identifier, account_attempts, now)
+        _record_login_attempt(login_ip_attempts, ip_identifier, ip_attempts, now)
+
+
+@contextmanager
+def login_verification_slot(ip_identifier: str) -> Iterator[None]:
+    global active_login_verifications
+    with login_attempts_lock:
+        if (
+            active_login_verifications >= MAX_CONCURRENT_LOGIN_VERIFICATIONS
+            or ip_identifier in active_login_ips
+        ):
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                "Too many concurrent login attempts. Please try again later.",
+            )
+        active_login_verifications += 1
+        active_login_ips.add(ip_identifier)
+    try:
+        yield
+    finally:
+        with login_attempts_lock:
+            active_login_verifications -= 1
+            active_login_ips.discard(ip_identifier)
+
+
+def clear_login_rate_limit(identifier: str) -> None:
+    with login_attempts_lock:
+        login_attempts.pop(identifier, None)
 
 router = APIRouter(prefix="/api/v1")
 
 
 class LoginRequest(BaseModel):
-    email: str
-    password: str
+    email: str = Field(min_length=1, max_length=320)
+    password: str = Field(min_length=1, max_length=1024)
 
 
 class RepositoryCreate(BaseModel):
@@ -188,16 +301,30 @@ class EmbeddingProfileCreate(BaseModel):
     base_url: str = Field(min_length=1, max_length=500)
     model: str = Field(min_length=1, max_length=200)
     dimension: int = Field(ge=64, le=4096)
-    credential_ref: str = Field(min_length=1, max_length=200)
+    credential_ref: str = Field(default="", max_length=200)
     backend: str = "chroma"
     provider: str = "openai"
+    api_key: str = Field(default="", max_length=1000)
+
+
+class EmbeddingProfileUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    base_url: str | None = Field(default=None, min_length=1, max_length=500)
+    model: str | None = Field(default=None, min_length=1, max_length=200)
+    dimension: int | None = Field(default=None, ge=64, le=4096)
+    credential_ref: str | None = Field(default=None, min_length=1, max_length=200)
+    provider: str | None = None
+    api_key: str = Field(default="", max_length=1000)
+    clear_api_key: bool = False
 
 
 class EmbeddingProfileProbe(BaseModel):
     base_url: str = Field(min_length=8, max_length=500)
     model: str = Field(min_length=1, max_length=200)
-    credential_ref: str = Field(min_length=1, max_length=200)
+    credential_ref: str = Field(default="", max_length=200)
     provider: str = "openai"
+    api_key: str = Field(default="", max_length=1000)
+    profile_id: str | None = Field(default=None, max_length=32)
 
 
 class SearchRequest(BaseModel):
@@ -227,9 +354,19 @@ class LlmProviderCreate(BaseModel):
     models: list[dict[str, str]] = Field(default_factory=list, max_length=500)
 
 
+class LlmProviderUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    base_url: str | None = Field(default=None, min_length=8, max_length=500)
+    model: str | None = Field(default=None, min_length=1, max_length=200)
+    models: list[dict[str, str]] | None = Field(default=None, max_length=500)
+    api_key: str = Field(default="", max_length=1000)
+    clear_api_key: bool = False
+
+
 class LlmProviderSyncRequest(BaseModel):
     base_url: str = Field(min_length=8, max_length=500)
     api_key: str = Field(default="", max_length=1000)
+    provider_id: str | None = Field(default=None, max_length=32)
 
 
 class MemberCreate(BaseModel):
@@ -268,6 +405,70 @@ class SlidingWindowLimiter:
 
 
 limiter = SlidingWindowLimiter()
+
+
+def require_browser_secret_transport(request: Request) -> None:
+    settings = request.app.state.settings
+    forwarded_proto = request.headers.get("x-forwarded-proto", "")
+    request_scheme = (forwarded_proto.split(",", 1)[0].strip() or request.url.scheme).lower()
+    if settings.environment == "production" and (
+        not settings.public_origin.startswith("https://")
+        or not settings.cookie_secure
+        or request_scheme != "https"
+    ):
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Browser-managed credentials require an HTTPS public origin and secure cookies",
+        )
+
+
+def check_provider_config_rate_limit(user_id: str) -> None:
+    limiter.check(f"provider-config:{user_id}", 30)
+
+
+def require_embedding_profile_mutation_lock(request: Request):
+    with database(request) as session:
+        identity = require_admin(request, session)
+        require_csrf(request, identity)
+    try:
+        with embedding_profile_lock(request.app.state.engine):
+            yield
+    except EmbeddingProfileLockError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+
+def require_llm_provider_mutation_lock(request: Request):
+    with database(request) as session:
+        identity = require_admin(request, session)
+        require_csrf(request, identity)
+    try:
+        with llm_provider_lock(request.app.state.engine):
+            yield
+    except LlmProviderLockError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+
+def require_index_job_schedule_lock(request: Request):
+    with database(request) as session:
+        identity = require_admin(request, session)
+        require_csrf(request, identity)
+    try:
+        with index_job_schedule_lock(request.app.state.engine):
+            yield
+    except IndexJobScheduleLockError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+
+def require_embedding_activation_locks(request: Request):
+    with database(request) as session:
+        identity = require_admin(request, session)
+        require_csrf(request, identity)
+    try:
+        with embedding_profile_lock(request.app.state.engine):
+            with index_job_schedule_lock(request.app.state.engine):
+                yield
+    except (EmbeddingProfileLockError, IndexJobScheduleLockError) as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
 
 
 def database(request: Request) -> Session:
@@ -416,16 +617,20 @@ def login(payload: LoginRequest, request: Request, response: Response):
     if origin and origin.rstrip("/") != request.app.state.settings.public_origin:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Origin is not allowed")
     client_ip = request.client.host if request.client else "unknown"
-    check_login_rate_limit(f"{client_ip}:{payload.email.strip().lower()}")
+    account_identifier = digest_secret(f"account:{payload.email.strip().lower()}")
+    ip_identifier = digest_secret(f"ip:{client_ip}")
+    check_login_rate_limits(account_identifier, ip_identifier)
     with database(request) as session:
         user = session.exec(select(User).where(User.email == payload.email.strip().lower())).first()
-        if (
-            not user
-            or not user.is_active
-            or not verify_password(payload.password, user.password_hash)
-        ):
+        with login_verification_slot(ip_identifier):
+            password_valid = verify_password(
+                payload.password,
+                user.password_hash if user else DUMMY_PASSWORD_HASH,
+            )
+        if not user or not user.is_active or not password_valid:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid email or password")
         identity = create_browser_session(session, user, response, request.app.state.settings)
+        clear_login_rate_limit(account_identifier)
         audit(session, "auth.login", "user", user.id, user.id)
         session.commit()
         return {"user": public_user(user), "csrf_token": identity.session.csrf_token}
@@ -870,25 +1075,44 @@ def list_embedding_profiles(request: Request):
     with database(request) as session:
         require_admin(request, session)
         return [
-            {
-                "id": item.id, "name": item.name, "base_url": item.base_url,
-                "model": item.model, "dimension": item.dimension,
-                "credential_ref": mask_credential_ref(item.credential_ref),
-                "credential_configured": bool(resolve_embedding_api_key(item.credential_ref)),
-                "credential_env": embedding_credential_name(item.credential_ref),
-                "backend": item.backend,
-                "provider": item.provider,
-                "is_active": item.is_active,
-            }
+            _serialize_embedding_profile(item, request.app.state.settings.data_dir)
             for item in session.exec(select(EmbeddingProfile)).all()
         ]
 
 
+def _serialize_embedding_profile(profile: EmbeddingProfile, data_dir: Path) -> dict:
+    return {
+        "id": profile.id,
+        "name": profile.name,
+        "base_url": profile.base_url,
+        "model": profile.model,
+        "dimension": profile.dimension,
+        "credential_ref": mask_credential_ref(profile.credential_ref),
+        "credential_configured": bool(resolve_embedding_api_key(profile, data_dir)),
+        "credential_source": (
+            "encrypted" if profile.api_key_ciphertext else
+            "server_ref" if resolve_embedding_api_key(profile.credential_ref) else
+            "none"
+        ),
+        "credential_env": embedding_credential_name(profile.credential_ref),
+        "backend": profile.backend,
+        "provider": profile.provider,
+        "is_active": profile.is_active,
+    }
+
+
 @router.post("/embedding-profiles", status_code=201)
-def create_embedding_profile(payload: EmbeddingProfileCreate, request: Request):
+def create_embedding_profile(
+    payload: EmbeddingProfileCreate,
+    request: Request,
+    _profile_lock: None = Depends(require_embedding_profile_mutation_lock),
+):
     with database(request) as session:
         identity = require_admin(request, session)
         require_csrf(request, identity)
+        check_provider_config_rate_limit(identity.user.id)
+        if payload.api_key.strip():
+            require_browser_secret_transport(request)
         if payload.backend != "chroma":
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Only Chroma is implemented")
         if payload.provider not in {"openai", "tencent_multimodal"}:
@@ -896,65 +1120,333 @@ def create_embedding_profile(payload: EmbeddingProfileCreate, request: Request):
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
                 "provider must be openai or tencent_multimodal",
             )
+        profile_id = new_id()
         try:
-            credential_ref = validate_credential_ref(payload.credential_ref)
+            credential_ref = (
+                validate_credential_ref(payload.credential_ref)
+                if payload.credential_ref.strip()
+                else f"embedding-{profile_id}"
+            )
         except ValueError as exc:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+        if session.exec(
+            select(EmbeddingProfile).where(
+                EmbeddingProfile.name == payload.name.strip()
+            )
+        ).first():
+            raise HTTPException(
+                status.HTTP_409_CONFLICT, "Embedding profile name already exists"
+            )
+        try:
+            ciphertext = encrypt_secret(
+                request.app.state.settings.data_dir, payload.api_key.strip()
+            )
+        except CredentialEncryptionError as exc:
+            raise HTTPException(
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                "Provider credential encryption failed",
+            ) from exc
         profile = EmbeddingProfile(
+            id=profile_id,
             name=payload.name.strip(), base_url=payload.base_url.strip().rstrip("/"),
             model=payload.model.strip(), dimension=payload.dimension,
             credential_ref=credential_ref, backend=payload.backend,
             provider=payload.provider,
+            api_key_ciphertext=ciphertext,
             created_by=identity.user.id,
         )
         session.add(profile)
+        audit(
+            session,
+            "embedding_profile.create",
+            "embedding_profile",
+            profile.id,
+            identity.user.id,
+        )
         session.commit()
         session.refresh(profile)
-        return {
-            "id": profile.id, "name": profile.name, "base_url": profile.base_url,
-            "model": profile.model, "dimension": profile.dimension,
-            "credential_ref": mask_credential_ref(profile.credential_ref),
-            "credential_configured": bool(resolve_embedding_api_key(profile.credential_ref)),
-            "credential_env": embedding_credential_name(profile.credential_ref),
-            "backend": profile.backend,
-            "provider": profile.provider,
-            "is_active": profile.is_active,
-        }
+        return _serialize_embedding_profile(profile, request.app.state.settings.data_dir)
+
+
+@router.patch("/embedding-profiles/{profile_id}")
+def update_embedding_profile(
+    profile_id: str,
+    payload: EmbeddingProfileUpdate,
+    request: Request,
+    _profile_lock: None = Depends(require_embedding_profile_mutation_lock),
+):
+    with database(request) as session:
+        identity = require_admin(request, session)
+        require_csrf(request, identity)
+        check_provider_config_rate_limit(identity.user.id)
+        profile = session.get(EmbeddingProfile, profile_id)
+        if not profile:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Embedding profile not found")
+        if payload.clear_api_key and payload.api_key.strip():
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "api_key and clear_api_key cannot be used together",
+            )
+        if payload.api_key.strip():
+            require_browser_secret_transport(request)
+        candidate_provider = payload.provider or profile.provider
+        if candidate_provider not in {"openai", "tencent_multimodal"}:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "provider must be openai or tencent_multimodal",
+            )
+        candidate_base_url = (
+            payload.base_url.strip().rstrip("/")
+            if payload.base_url
+            else profile.base_url
+        )
+        candidate_model = payload.model.strip() if payload.model else profile.model
+        candidate_dimension = (
+            payload.dimension if payload.dimension is not None else profile.dimension
+        )
+        vector_settings_changed = (
+            candidate_base_url != profile.base_url
+            or candidate_model != profile.model
+            or candidate_dimension != profile.dimension
+            or candidate_provider != profile.provider
+        )
+        if (
+            candidate_base_url != profile.base_url.rstrip("/")
+            and not payload.api_key.strip()
+            and resolve_embedding_api_key(profile, request.app.state.settings.data_dir)
+        ):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "A replacement API key is required when changing Base URL",
+            )
+        if profile.is_active and vector_settings_changed:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Active embedding vector settings cannot be edited; "
+                "create or edit an inactive profile and activate it",
+            )
+        if payload.name is not None:
+            duplicate = session.exec(
+                select(EmbeddingProfile).where(
+                    EmbeddingProfile.name == payload.name.strip(),
+                    EmbeddingProfile.id != profile.id,
+                )
+            ).first()
+            if duplicate:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT, "Embedding profile name already exists"
+                )
+            candidate_name = payload.name.strip()
+        else:
+            candidate_name = profile.name
+        if payload.credential_ref is not None:
+            try:
+                candidate_credential_ref = validate_credential_ref(payload.credential_ref)
+            except ValueError as exc:
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+        else:
+            candidate_credential_ref = profile.credential_ref
+        replacement_ciphertext: str | None = None
+        if payload.clear_api_key:
+            replacement_ciphertext = ""
+        elif payload.api_key.strip():
+            try:
+                replacement_ciphertext = encrypt_secret(
+                    request.app.state.settings.data_dir, payload.api_key.strip()
+                )
+            except CredentialEncryptionError as exc:
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+        if vector_settings_changed:
+            active_generation_ids = [
+                repository.active_generation_id
+                for repository in session.exec(select(Repository)).all()
+                if repository.active_generation_id
+                and repository.status in {"ready", "indexing"}
+            ]
+            if profile_contains_generation(
+                request.app.state.settings,
+                profile.id,
+                active_generation_ids,
+            ):
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    "Embedding profile still contains a repository's active generation",
+                )
+            try:
+                delete_profile_collections(request.app.state.settings, profile.id)
+            except Exception as exc:
+                raise HTTPException(
+                    status.HTTP_503_SERVICE_UNAVAILABLE,
+                    "Embedding vector collections could not be removed",
+                ) from exc
+        profile.name = candidate_name
+        profile.base_url = candidate_base_url
+        profile.model = candidate_model
+        profile.dimension = candidate_dimension
+        profile.provider = candidate_provider
+        profile.credential_ref = candidate_credential_ref
+        if replacement_ciphertext is not None:
+            profile.api_key_ciphertext = replacement_ciphertext
+        if profile.is_active and not resolve_embedding_api_key(
+            profile, request.app.state.settings.data_dir
+        ):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Cannot clear the only credential from the active embedding profile",
+            )
+        session.add(profile)
+        action = (
+            "embedding_profile.credential_clear"
+            if payload.clear_api_key
+            else "embedding_profile.credential_replace"
+            if payload.api_key.strip()
+            else "embedding_profile.update"
+        )
+        audit(
+            session,
+            action,
+            "embedding_profile",
+            profile.id,
+            identity.user.id,
+        )
+        session.commit()
+        session.refresh(profile)
+        return _serialize_embedding_profile(profile, request.app.state.settings.data_dir)
+
+
+@router.delete("/embedding-profiles/{profile_id}", status_code=204)
+def delete_embedding_profile(
+    profile_id: str,
+    request: Request,
+    _profile_lock: None = Depends(require_embedding_profile_mutation_lock),
+):
+    with database(request) as session:
+        identity = require_admin(request, session)
+        require_csrf(request, identity)
+        check_provider_config_rate_limit(identity.user.id)
+        profile = session.get(EmbeddingProfile, profile_id)
+        if not profile:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Embedding profile not found")
+        if profile.is_active:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT, "Active embedding profile cannot be deleted"
+            )
+        active_job = session.exec(
+            select(IndexJob).where(col(IndexJob.status).in_(["queued", "running"]))
+        ).first()
+        if active_job:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Wait for current indexing jobs to finish before deleting an embedding profile",
+            )
+        active_generation_ids = [
+            repository.active_generation_id
+            for repository in session.exec(select(Repository)).all()
+            if repository.active_generation_id
+            and repository.status in {"ready", "indexing"}
+        ]
+        if profile_contains_generation(
+            request.app.state.settings,
+            profile.id,
+            active_generation_ids,
+        ):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Embedding profile still contains a repository's active generation",
+            )
+        try:
+            delete_profile_collections(request.app.state.settings, profile.id)
+        except Exception as exc:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "Embedding vector collections could not be removed",
+            ) from exc
+        session.delete(profile)
+        audit(
+            session,
+            "embedding_profile.delete",
+            "embedding_profile",
+            profile.id,
+            identity.user.id,
+        )
+        session.commit()
 
 
 @router.post("/embedding-profiles/probe")
-def probe_embedding_profile(payload: EmbeddingProfileProbe, request: Request):
+def probe_embedding_profile(
+    payload: EmbeddingProfileProbe,
+    request: Request,
+    _profile_lock: None = Depends(require_embedding_profile_mutation_lock),
+):
     with database(request) as session:
         identity = require_admin(request, session)
         require_csrf(request, identity)
-    try:
-        credential_ref = validate_credential_ref(payload.credential_ref)
-        api_key = resolve_embedding_api_key(credential_ref)
-        if not api_key:
-            raise ValueError(
-                "Embedding credential is not configured on the server: "
-                f"{embedding_credential_name(credential_ref)}"
+        check_provider_config_rate_limit(identity.user.id)
+        if payload.api_key.strip():
+            require_browser_secret_transport(request)
+        profile = session.get(EmbeddingProfile, payload.profile_id) if payload.profile_id else None
+        if payload.profile_id and profile is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Embedding profile not found")
+        try:
+            credential_ref = (
+                profile.credential_ref
+                if profile
+                else validate_credential_ref(payload.credential_ref)
+                if payload.credential_ref.strip()
+                else "browser-probe"
             )
-        if payload.provider not in {"openai", "tencent_multimodal"}:
-            raise ValueError("provider must be openai or tencent_multimodal")
-        probe_settings = replace(
-            request.app.state.settings,
-            embedding_mode=payload.provider,
-            embedding_base_url=payload.base_url.strip().rstrip("/"),
-            embedding_api_key=api_key,
-            embedding_model=payload.model.strip(),
+            requested_base_url = payload.base_url.strip().rstrip("/")
+            if (
+                profile
+                and not payload.api_key.strip()
+                and requested_base_url != profile.base_url.rstrip("/")
+            ):
+                raise ValueError(
+                    "A replacement API key is required to test a different Base URL"
+                )
+            api_key = payload.api_key.strip() or (
+                resolve_embedding_api_key(profile, request.app.state.settings.data_dir)
+                if profile
+                else resolve_embedding_api_key(credential_ref)
+            )
+            if not api_key:
+                raise ValueError(
+                    "Embedding credential is not configured on the server: "
+                    f"{embedding_credential_name(credential_ref)}"
+                )
+            if payload.provider not in {"openai", "tencent_multimodal"}:
+                raise ValueError("provider must be openai or tencent_multimodal")
+            probe_settings = replace(
+                request.app.state.settings,
+                embedding_mode=payload.provider,
+                embedding_base_url=requested_base_url,
+                embedding_api_key=api_key,
+                embedding_model=payload.model.strip(),
+            )
+            dimension = EmbeddingClient(probe_settings).probe_dimension()
+        except (ValueError, httpx.HTTPError) as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+        audit(
+            session,
+            "embedding_profile.test",
+            "embedding_profile",
+            profile.id if profile else "new",
+            identity.user.id,
         )
-        dimension = EmbeddingClient(probe_settings).probe_dimension()
-    except (ValueError, httpx.HTTPError) as exc:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
-    return {"dimension": dimension}
+        session.commit()
+        return {"dimension": dimension}
 
 
 @router.post("/embedding-profiles/{profile_id}/activate")
-def activate_embedding_profile(profile_id: str, request: Request):
+def activate_embedding_profile(
+    profile_id: str,
+    request: Request,
+    _activation_locks: None = Depends(require_embedding_activation_locks),
+):
     with database(request) as session:
         identity = require_admin(request, session)
         require_csrf(request, identity)
+        check_provider_config_rate_limit(identity.user.id)
         profile = session.get(EmbeddingProfile, profile_id)
         if not profile:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Embedding profile not found")
@@ -1025,20 +1517,10 @@ def activate_embedding_profile(profile_id: str, request: Request):
                 identity.user.id,
             )
             job_ids = [job.id for job in jobs]
-            response = {
-                "id": profile.id,
-                "name": profile.name,
-                "base_url": profile.base_url,
-                "model": profile.model,
-                "dimension": profile.dimension,
-                "credential_ref": mask_credential_ref(profile.credential_ref),
-                "credential_configured": bool(resolve_embedding_api_key(profile.credential_ref)),
-                "credential_env": embedding_credential_name(profile.credential_ref),
-                "backend": profile.backend,
-                "provider": profile.provider,
-                "is_active": profile.is_active,
-                "queued_jobs": len(job_ids),
-            }
+            response = _serialize_embedding_profile(
+                profile, request.app.state.settings.data_dir
+            )
+            response["queued_jobs"] = len(job_ids)
             session.commit()
             switch_committed = True
         finally:
@@ -1046,13 +1528,25 @@ def activate_embedding_profile(profile_id: str, request: Request):
                 session.rollback()
             if not switch_committed:
                 request.app.state.external_sync.end_embedding_switch()
+    knowledge_error: Exception | None = None
     try:
-        request.app.state.knowledge_search.refresh_embedding_context()
-        response["knowledge_rebuild"] = request.app.state.knowledge_search.rebuild_all()
+        try:
+            request.app.state.knowledge_search.refresh_embedding_context()
+            response["knowledge_rebuild"] = (
+                request.app.state.knowledge_search.rebuild_all()
+            )
+        except Exception as exc:
+            knowledge_error = exc
         request.app.state.job_queue.submit(job_ids)
-        return response
     finally:
         request.app.state.external_sync.end_embedding_switch()
+    if knowledge_error is not None:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            "Embedding profile is already active and repository jobs were submitted, "
+            "but the document and Wiki knowledge context could not be rebuilt",
+        ) from knowledge_error
+    return response
 
 
 @router.post("/gitlab-sources", status_code=201)
@@ -1231,7 +1725,11 @@ def archive_repository(repository_id: str, request: Request):
 
 
 @router.post("/repositories/{repository_id}/sync", status_code=202)
-def queue_sync(repository_id: str, request: Request):
+def queue_sync(
+    repository_id: str,
+    request: Request,
+    _schedule_lock: None = Depends(require_index_job_schedule_lock),
+):
     with database(request) as session:
         identity = require_admin(request, session)
         require_csrf(request, identity)
@@ -1316,10 +1814,17 @@ def list_llm_providers(request: Request):
 
 
 @router.post("/llm/providers", status_code=201)
-def create_llm_provider(payload: LlmProviderCreate, request: Request):
+def create_llm_provider(
+    payload: LlmProviderCreate,
+    request: Request,
+    _provider_lock: None = Depends(require_llm_provider_mutation_lock),
+):
     with database(request) as session:
         identity = require_admin(request, session)
         require_csrf(request, identity)
+        check_provider_config_rate_limit(identity.user.id)
+        if payload.api_key.strip():
+            require_browser_secret_transport(request)
         try:
             base_url = normalize_base_url(payload.base_url)
         except ValueError as exc:
@@ -1330,34 +1835,235 @@ def create_llm_provider(payload: LlmProviderCreate, request: Request):
         provider = LlmProvider(
             name=name, base_url=base_url, model=payload.model.strip(),
             api_key_ciphertext=encrypt_api_key(
-                request.app.state.settings.data_dir, payload.api_key
+                request.app.state.settings.data_dir, payload.api_key.strip()
             ),
             models_json=json.dumps(payload.models, ensure_ascii=False),
             created_by=identity.user.id,
         )
         session.add(provider)
+        audit(
+            session,
+            "llm_provider.create",
+            "llm_provider",
+            provider.id,
+            identity.user.id,
+        )
         session.commit()
         session.refresh(provider)
         return _serialize_llm_provider(provider)
 
 
-@router.post("/llm/providers/sync")
-def sync_llm_provider(payload: LlmProviderSyncRequest, request: Request):
+@router.patch("/llm/providers/{provider_id}")
+def update_llm_provider(
+    provider_id: str,
+    payload: LlmProviderUpdate,
+    request: Request,
+    _provider_lock: None = Depends(require_llm_provider_mutation_lock),
+):
     with database(request) as session:
         identity = require_admin(request, session)
         require_csrf(request, identity)
-    try:
-        models = sync_models(payload.base_url, payload.api_key)
-    except (LlmProviderError, ValueError) as exc:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
-    return {"models": models, "count": len(models)}
+        check_provider_config_rate_limit(identity.user.id)
+        provider = session.get(LlmProvider, provider_id)
+        if not provider:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "provider not found")
+        if payload.clear_api_key and payload.api_key.strip():
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "api_key and clear_api_key cannot be used together",
+            )
+        if payload.api_key.strip():
+            require_browser_secret_transport(request)
+        if payload.name is not None:
+            duplicate = session.exec(
+                select(LlmProvider).where(
+                    LlmProvider.name == payload.name.strip(),
+                    LlmProvider.id != provider.id,
+                )
+            ).first()
+            if duplicate:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT, "provider name already exists"
+                )
+            provider.name = payload.name.strip()
+        if payload.base_url is not None:
+            try:
+                candidate_base_url = normalize_base_url(payload.base_url)
+            except ValueError as exc:
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+            if (
+                candidate_base_url != provider.base_url
+                and provider.api_key_ciphertext
+                and not payload.api_key.strip()
+            ):
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    "A replacement API key is required when changing Base URL",
+                )
+            provider.base_url = candidate_base_url
+        if payload.model is not None:
+            provider.model = payload.model.strip()
+        if payload.models is not None:
+            provider.models_json = json.dumps(payload.models, ensure_ascii=False)
+        if payload.clear_api_key:
+            if provider.is_active:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    "Cannot clear the API key from the active LLM provider",
+                )
+            provider.api_key_ciphertext = ""
+        elif payload.api_key.strip():
+            provider.api_key_ciphertext = encrypt_api_key(
+                request.app.state.settings.data_dir, payload.api_key.strip()
+            )
+        session.add(provider)
+        action = (
+            "llm_provider.credential_clear"
+            if payload.clear_api_key
+            else "llm_provider.credential_replace"
+            if payload.api_key.strip()
+            else "llm_provider.update"
+        )
+        audit(
+            session,
+            action,
+            "llm_provider",
+            provider.id,
+            identity.user.id,
+        )
+        session.commit()
+        session.refresh(provider)
+        return _serialize_llm_provider(provider)
+
+
+@router.delete("/llm/providers/{provider_id}", status_code=204)
+def delete_llm_provider(
+    provider_id: str,
+    request: Request,
+    _provider_lock: None = Depends(require_llm_provider_mutation_lock),
+):
+    with database(request) as session:
+        identity = require_admin(request, session)
+        require_csrf(request, identity)
+        check_provider_config_rate_limit(identity.user.id)
+        provider = session.get(LlmProvider, provider_id)
+        if not provider:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "provider not found")
+        if provider.is_active:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT, "Active LLM provider cannot be deleted"
+            )
+        session.delete(provider)
+        audit(
+            session,
+            "llm_provider.delete",
+            "llm_provider",
+            provider.id,
+            identity.user.id,
+        )
+        session.commit()
+
+
+@router.post("/llm/providers/{provider_id}/test")
+def test_llm_provider(
+    provider_id: str,
+    request: Request,
+    _provider_lock: None = Depends(require_llm_provider_mutation_lock),
+):
+    with database(request) as session:
+        identity = require_admin(request, session)
+        require_csrf(request, identity)
+        check_provider_config_rate_limit(identity.user.id)
+        provider = session.get(LlmProvider, provider_id)
+        if not provider:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "provider not found")
+        key = decrypt_api_key(request.app.state.settings.data_dir, provider)
+        if not key:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "provider API key is not configured",
+            )
+        try:
+            models = sync_models(provider.base_url, key)
+        except (LlmProviderError, ValueError) as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+        provider.models_json = json.dumps(models, ensure_ascii=False)
+        provider.last_synced_at = utc_now()
+        session.add(provider)
+        audit(
+            session,
+            "llm_provider.test",
+            "llm_provider",
+            provider.id,
+            identity.user.id,
+        )
+        session.commit()
+        return {"models": models, "count": len(models)}
+
+
+@router.post("/llm/providers/sync")
+def sync_llm_provider(
+    payload: LlmProviderSyncRequest,
+    request: Request,
+    _provider_lock: None = Depends(require_llm_provider_mutation_lock),
+):
+    with database(request) as session:
+        identity = require_admin(request, session)
+        require_csrf(request, identity)
+        check_provider_config_rate_limit(identity.user.id)
+        if payload.api_key.strip():
+            require_browser_secret_transport(request)
+        provider = session.get(LlmProvider, payload.provider_id) if payload.provider_id else None
+        if payload.provider_id and provider is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "provider not found")
+        try:
+            requested_base_url = normalize_base_url(payload.base_url)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+        if (
+            provider
+            and not payload.api_key.strip()
+            and requested_base_url != provider.base_url
+        ):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "A replacement API key is required to test a different Base URL",
+            )
+        key = payload.api_key.strip() or (
+            decrypt_api_key(request.app.state.settings.data_dir, provider)
+            if provider
+            else ""
+        )
+        if not key:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "provider API key is not configured",
+            )
+        try:
+            models = sync_models(requested_base_url, key)
+        except (LlmProviderError, ValueError) as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+        audit(
+            session,
+            "llm_provider.test",
+            "llm_provider",
+            provider.id if provider else "new",
+            identity.user.id,
+        )
+        session.commit()
+        return {"models": models, "count": len(models)}
 
 
 @router.post("/llm/providers/{provider_id}/activate")
-def activate_llm_provider(provider_id: str, request: Request):
+def activate_llm_provider(
+    provider_id: str,
+    request: Request,
+    _provider_lock: None = Depends(require_llm_provider_mutation_lock),
+):
     with database(request) as session:
         identity = require_admin(request, session)
         require_csrf(request, identity)
+        check_provider_config_rate_limit(identity.user.id)
         provider = session.get(LlmProvider, provider_id)
         if not provider:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "provider not found")
@@ -1372,6 +2078,13 @@ def activate_llm_provider(provider_id: str, request: Request):
             session.add(item)
         provider.is_active = True
         session.add(provider)
+        audit(
+            session,
+            "llm_provider.activate",
+            "llm_provider",
+            provider.id,
+            identity.user.id,
+        )
         session.commit()
         return _serialize_llm_provider(provider)
 

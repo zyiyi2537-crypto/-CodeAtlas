@@ -6,10 +6,12 @@ import os
 import re
 import time
 from dataclasses import replace
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpx
 
+from .credential_crypto import CredentialEncryptionError, decrypt_secret
 from .settings import Settings
 
 if TYPE_CHECKING:
@@ -23,14 +25,29 @@ def embedding_credential_name(credential_ref: str) -> str:
     return f"CODEATLAS_CREDENTIAL_{normalized}"
 
 
-def resolve_embedding_api_key(credential_ref: str) -> str:
-    """Resolve a profile reference without ever persisting the secret."""
+def resolve_embedding_api_key(
+    profile_or_ref: EmbeddingProfile | str,
+    data_dir: Path | None = None,
+) -> str:
+    """Resolve encrypted browser credentials first, then a server-side reference."""
+    credential_ref = (
+        profile_or_ref.credential_ref
+        if not isinstance(profile_or_ref, str)
+        else profile_or_ref
+    )
+    if not isinstance(profile_or_ref, str) and profile_or_ref.api_key_ciphertext:
+        if data_dir is None:
+            raise ValueError("Embedding credential data directory is required")
+        try:
+            return decrypt_secret(data_dir, profile_or_ref.api_key_ciphertext)
+        except CredentialEncryptionError as exc:
+            raise ValueError(str(exc)) from exc
     environment_name = embedding_credential_name(credential_ref)
     return os.getenv(environment_name, "").strip()
 
 
 def settings_for_profile(settings: Settings, profile: EmbeddingProfile) -> Settings:
-    api_key = resolve_embedding_api_key(profile.credential_ref)
+    api_key = resolve_embedding_api_key(profile, settings.data_dir)
     if not api_key:
         raise ValueError(
             f"Embedding credential is not configured on the server: "

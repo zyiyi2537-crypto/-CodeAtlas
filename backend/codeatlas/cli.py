@@ -10,6 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlmodel import Session, col, select
 
 from .database import create_database, initialize_database
+from .index_job_schedule_lock import index_job_schedule_lock
 from .indexing import IndexCoordinator
 from .job_queue import IndexJobQueue, JobRequest
 from .legacy_migration import migrate_sqlite_database
@@ -100,25 +101,28 @@ def index_demo(_args) -> None:
     settings, engine = resources()
     names = [item[0] for item in DEMO_REPOSITORIES]
     queue = IndexJobQueue(engine)
-    with Session(engine) as session:
-        admin = session.exec(select(User).where(User.role == "admin")).first()
-        repositories = session.exec(
-            select(Repository).where(col(Repository.name).in_(names))
-        ).all()
-        if not admin:
-            raise SystemExit("Create an administrator first")
-        if len(repositories) != len(names):
-            raise SystemExit("Run seed-demo before index-demo")
-        jobs = [
-            queue.add(
-                session,
-                JobRequest(repository_id=repository.id, created_by=admin.id),
-                skip_if_active=True,
-            )
-            for repository in repositories
-        ]
-        session.commit()
-        job_ids = [job.id for job in jobs if job is not None]
+    with index_job_schedule_lock(engine):
+        with Session(engine) as session:
+            admin = session.exec(select(User).where(User.role == "admin")).first()
+            repositories = session.exec(
+                select(Repository)
+                .where(col(Repository.name).in_(names))
+                .order_by(Repository.id)
+            ).all()
+            if not admin:
+                raise SystemExit("Create an administrator first")
+            if len(repositories) != len(names):
+                raise SystemExit("Run seed-demo before index-demo")
+            jobs = [
+                queue.add(
+                    session,
+                    JobRequest(repository_id=repository.id, created_by=admin.id),
+                    skip_if_active=True,
+                )
+                for repository in repositories
+            ]
+            session.commit()
+            job_ids = [job.id for job in jobs if job is not None]
 
     coordinator = IndexCoordinator(settings, engine)
     failures: list[str] = []

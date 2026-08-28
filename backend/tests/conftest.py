@@ -10,7 +10,8 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from sqlmodel import Session
 
-from codeatlas.api import limiter, login_attempts
+from codeatlas import api
+from codeatlas.api import active_login_ips, limiter, login_attempts, login_ip_attempts
 from codeatlas.app import create_app
 from codeatlas.models import User
 from codeatlas.security import hash_password
@@ -75,6 +76,9 @@ def settings(tmp_path: Path, mysql_database_url: str) -> Settings:
 def application(settings: Settings):
     limiter.events.clear()
     login_attempts.clear()
+    login_ip_attempts.clear()
+    active_login_ips.clear()
+    api.active_login_verifications = 0
     app = create_app(settings)
     yield app
     app.state.engine.dispose()
