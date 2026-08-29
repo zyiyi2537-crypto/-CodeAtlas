@@ -42,6 +42,8 @@ def test_installer_fails_closed_without_https_and_migrates_old_allowlist() -> No
     assert '"$PYTHON_BIN" "$SOURCE_ROOT/deploy/validate_nginx.py"' in installer
     assert '"$PYTHON_BIN" -m venv /opt/codeatlas/backend/.venv' in installer
     assert 'python3 "$SOURCE_ROOT/deploy/validate_nginx.py"' not in installer
+    assert "cd /opt/codeatlas/backend" in installer
+    assert ".venv/bin/python -m alembic -c alembic.ini upgrade head" in installer
     assert 'nginx -t -c "$NGINX_PREFLIGHT"' in installer
     assert installer.index('nginx -t -c "$NGINX_PREFLIGHT"') < installer.index(
         'rsync -a --delete \\\n'

@@ -228,8 +228,10 @@ rsync -a --delete "$SOURCE_ROOT/frontend-dist/" /var/www/codeatlas/lab/code-kb/
 "$PYTHON_BIN" -m venv /opt/codeatlas/backend/.venv
 /opt/codeatlas/backend/.venv/bin/pip install --upgrade pip wheel
 /opt/codeatlas/backend/.venv/bin/pip install /opt/codeatlas/backend
-/opt/codeatlas/backend/.venv/bin/python -m alembic \
-  -c /opt/codeatlas/backend/alembic.ini upgrade head
+(
+  cd /opt/codeatlas/backend
+  .venv/bin/python -m alembic -c alembic.ini upgrade head
+)
 
 install -d -m 0700 /var/backups/codeatlas
 NGINX_BACKUP_DIR=$(mktemp -d /var/backups/codeatlas/nginx-install-XXXXXXXX)
