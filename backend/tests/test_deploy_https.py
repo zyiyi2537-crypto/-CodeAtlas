@@ -36,6 +36,12 @@ def test_installer_fails_closed_without_https_and_migrates_old_allowlist() -> No
     assert '"https://$CODEATLAS_DOMAIN/api/code-kb/health"' in installer
     assert "-g codeatlas" in installer
     assert "deploy/validate_nginx.py" in installer
+    assert 'PYTHON_BIN=${CODEATLAS_PYTHON_BIN:-python3.12}' in installer
+    assert 'command -v "$PYTHON_BIN"' in installer
+    assert 'sys.version_info >= (3, 11)' in installer
+    assert '"$PYTHON_BIN" "$SOURCE_ROOT/deploy/validate_nginx.py"' in installer
+    assert '"$PYTHON_BIN" -m venv /opt/codeatlas/backend/.venv' in installer
+    assert 'python3 "$SOURCE_ROOT/deploy/validate_nginx.py"' not in installer
     assert 'nginx -t -c "$NGINX_PREFLIGHT"' in installer
     assert installer.index('nginx -t -c "$NGINX_PREFLIGHT"') < installer.index(
         'rsync -a --delete \\\n'

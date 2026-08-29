@@ -6,6 +6,7 @@ ENV_FILE=/etc/codeatlas/codeatlas.env
 NGINX_TARGET=/etc/nginx/conf.d/codeatlas.conf
 NGINX_DEFAULT=/etc/nginx/conf.d/default.conf
 CODEATLAS_SERVICE=/etc/systemd/system/codeatlas.service
+PYTHON_BIN=${CODEATLAS_PYTHON_BIN:-python3.12}
 NGINX_CANDIDATE=""
 NGINX_PREFLIGHT=""
 
@@ -29,6 +30,15 @@ if [[ ! -d "$SOURCE_ROOT/backend" || ! -d "$SOURCE_ROOT/frontend-dist" || ! -d "
 fi
 if [[ ! -f "$SOURCE_ROOT/deploy/validate_nginx.py" ]]; then
   echo "Release directory has no Nginx safety validator" >&2
+  exit 1
+fi
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+  echo "Python 3.11 or newer is required: $PYTHON_BIN" >&2
+  exit 1
+fi
+if ! "$PYTHON_BIN" -c \
+  'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)'; then
+  echo "Python 3.11 or newer is required: $PYTHON_BIN" >&2
   exit 1
 fi
 
@@ -98,7 +108,7 @@ dnf install -y --disableexcludes=all --allowerasing nginx rsync git mysql mysql-
 # Build and validate the candidate before copying code or applying migrations.
 NGINX_CANDIDATE=$(mktemp /tmp/codeatlas-nginx.XXXXXX.conf)
 if [[ -f "$NGINX_TARGET" ]] && grep -Eq 'listen[[:space:]]+443([^0-9]|$)' "$NGINX_TARGET"; then
-  python3 - "$NGINX_TARGET" "$NGINX_CANDIDATE" <<'PY'
+  "$PYTHON_BIN" - "$NGINX_TARGET" "$NGINX_CANDIDATE" <<'PY'
 import re
 import sys
 from pathlib import Path
@@ -114,7 +124,8 @@ content = re.sub(
 target.write_text(content, encoding="utf-8")
 PY
 else
-  python3 - "$SOURCE_ROOT/deploy/nginx-codeatlas.conf" "$NGINX_CANDIDATE" "$CODEATLAS_DOMAIN" <<'PY'
+  "$PYTHON_BIN" - \
+    "$SOURCE_ROOT/deploy/nginx-codeatlas.conf" "$NGINX_CANDIDATE" "$CODEATLAS_DOMAIN" <<'PY'
 import sys
 from pathlib import Path
 
@@ -124,7 +135,7 @@ content = source.read_text(encoding="utf-8").replace("CODEATLAS_DOMAIN", domain)
 target.write_text(content, encoding="utf-8")
 PY
 fi
-python3 "$SOURCE_ROOT/deploy/validate_nginx.py" \
+"$PYTHON_BIN" "$SOURCE_ROOT/deploy/validate_nginx.py" \
   "$NGINX_CANDIDATE" "$CODEATLAS_DOMAIN"
 
 NGINX_PREFLIGHT=$(mktemp /tmp/codeatlas-nginx-preflight.XXXXXX.conf)
@@ -214,7 +225,7 @@ fi
 install -d -m 0755 /var/www/codeatlas/lab/code-kb
 rsync -a --delete "$SOURCE_ROOT/frontend-dist/" /var/www/codeatlas/lab/code-kb/
 
-python3.12 -m venv /opt/codeatlas/backend/.venv
+"$PYTHON_BIN" -m venv /opt/codeatlas/backend/.venv
 /opt/codeatlas/backend/.venv/bin/pip install --upgrade pip wheel
 /opt/codeatlas/backend/.venv/bin/pip install /opt/codeatlas/backend
 /opt/codeatlas/backend/.venv/bin/python -m alembic \
