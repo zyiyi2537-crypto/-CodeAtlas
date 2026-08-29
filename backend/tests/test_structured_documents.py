@@ -5,6 +5,7 @@ from io import BytesIO
 import fitz
 from docx import Document
 from openpyxl import Workbook
+from openpyxl.worksheet.table import Table
 from pptx import Presentation
 
 from codeatlas.documents import (
@@ -93,6 +94,55 @@ def test_xlsx_preserves_sheet_table_and_header_context() -> None:
     assert blocks[0].hierarchy == ("API Owners",)
     assert blocks[0].metadata["header"] == ["Service", "Owner"]
     assert "Search | Platform" in blocks[0].text
+
+
+def test_xlsx_native_table_preserves_real_source_rows_and_table_name() -> None:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "SLA矩阵"
+    sheet["A16"] = "Service"
+    sheet["B16"] = "Target"
+    sheet["A17"] = "Order"
+    sheet["B17"] = "800ms"
+    sheet["A18"] = "Inventory"
+    sheet["B18"] = "450ms"
+    sheet.add_table(Table(displayName="SlaMatrix", ref="A16:B18"))
+    stream = BytesIO()
+    workbook.save(stream)
+
+    blocks = extract_structured_blocks("sla.xlsx", stream.getvalue())
+
+    assert blocks[0].hierarchy == ("SLA矩阵", "SlaMatrix")
+    assert blocks[0].metadata["table"] == "SlaMatrix"
+    assert blocks[0].metadata["row_start"] == 17
+    assert blocks[0].metadata["row_end"] == 18
+    assert "Order | 800ms" in blocks[0].text
+
+
+def test_xlsx_preserves_populated_cells_outside_native_tables() -> None:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "SLA矩阵"
+    sheet["D2"] = "说明"
+    sheet["E2"] = "当前数据窗口为8月"
+    sheet["A16"] = "Service"
+    sheet["B16"] = "Target"
+    sheet["A17"] = "Order"
+    sheet["B17"] = "800ms"
+    sheet.add_table(Table(displayName="SlaMatrix", ref="A16:B17"))
+    stream = BytesIO()
+    workbook.save(stream)
+
+    blocks = extract_structured_blocks("sla.xlsx", stream.getvalue())
+
+    table = next(block for block in blocks if block.metadata.get("table") == "SlaMatrix")
+    outside = next(block for block in blocks if block.kind == "sheet-cells")
+    assert table.metadata["row_start"] == 17
+    assert outside.metadata["sheet"] == "SLA矩阵"
+    assert outside.metadata["row_start"] == 2
+    assert outside.metadata["row_end"] == 2
+    assert "D2: 说明" in outside.text
+    assert "E2: 当前数据窗口为8月" in outside.text
 
 
 def test_pdf_preserves_page_numbers_and_detects_scans() -> None:

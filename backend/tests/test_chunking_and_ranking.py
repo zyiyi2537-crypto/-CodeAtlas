@@ -6,7 +6,7 @@ import pytest
 
 from codeatlas.chunker import chunk_file
 from codeatlas.embeddings import EmbeddingClient
-from codeatlas.ranking import fuse_and_rerank, tokenize
+from codeatlas.ranking import fuse_and_rerank, rerank_across_source_types, tokenize
 from codeatlas.settings import Settings
 
 
@@ -88,3 +88,24 @@ def test_rrf_marks_hybrid_hits_and_suppresses_overlap() -> None:
     assert results[0]["retrieval"] == "hybrid"
     assert len(results) == 1
     assert "searchcode" in tokenize("searchCode")
+
+
+def test_cross_source_rrf_does_not_compare_incompatible_raw_scores() -> None:
+    results = rerank_across_source_types(
+        [
+            {"id": "code-1", "source_type": "code", "score": 0.001},
+            {"id": "code-2", "source_type": "code", "score": 0.0009},
+            {"id": "doc-1", "source_type": "document", "score": 0.99},
+            {"id": "wiki-1", "source_type": "wiki", "score": 0.4},
+        ],
+        limit=4,
+    )
+
+    by_id = {item["id"]: item for item in results}
+    assert by_id["code-1"]["source_rank"] == 1
+    assert by_id["doc-1"]["source_rank"] == 1
+    assert by_id["wiki-1"]["source_rank"] == 1
+    assert by_id["code-1"]["score"] == by_id["doc-1"]["score"]
+    assert by_id["code-2"]["score"] < by_id["code-1"]["score"]
+    assert by_id["doc-1"]["source_score"] == 0.99
+    assert [item["id"] for item in results[:3]] == ["code-1", "doc-1", "wiki-1"]

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from codeatlas.embeddings import EmbeddingClient
 from codeatlas.knowledge_search import KnowledgeSearch
-from codeatlas.models import DocumentChunkRecord, WikiPage
+from codeatlas.models import WikiPage
 from codeatlas.settings import Settings
 from codeatlas.vector_store import KnowledgeVectorChunk, VectorStore
 
@@ -94,33 +94,25 @@ def test_knowledge_search_fuses_vector_and_lexical_results(tmp_path: Path, monke
     search = KnowledgeSearch(FakeEngine(), settings)
     monkeypatch.setattr(
         search,
-        "_document_rows",
-        lambda _collections: [
-            DocumentChunkRecord(
-                id="doc-lexical",
-                document_id="doc-1",
-                collection_id="collection-1",
-                title="Deployment",
-                section="Nginx",
-                page=2,
-                structure_type="section",
-                metadata_json="{}",
-                content="Configure the reverse proxy.",
-            )
-        ],
-    )
-    monkeypatch.setattr(
-        search,
-        "_wiki_rows",
-        lambda: [
-            WikiPage(
-                id="wiki-1",
-                path="operations/backup.md",
-                title="Backup",
-                content="Back up MySQL and Chroma.",
-                sources_json='["document://guide"]',
-                created_by="admin",
-            )
+        "_lexical_candidates",
+        lambda *_args, **_kwargs: [
+            {
+                "id": "doc-lexical",
+                "source_type": "document",
+                "source_id": "doc-1",
+                "collection_id": "collection-1",
+                "title": "Deployment",
+                "section": "Nginx",
+                "page": 2,
+                "content": "Configure the reverse proxy.",
+                "structure_type": "section",
+                "sheet": "",
+                "row_start": None,
+                "row_end": None,
+                "slide": None,
+                "sources": [],
+                "lexical_score": 1.0,
+            }
         ],
     )
     monkeypatch.setattr(search, "_indexed_document_ids", lambda: {"doc-1"})
@@ -149,3 +141,175 @@ def test_knowledge_search_fuses_vector_and_lexical_results(tmp_path: Path, monke
     assert results[0]["source_type"] == "document"
     assert results[0]["retrieval"] == "hybrid"
     assert results[0]["page"] == 2
+
+
+def test_knowledge_search_uses_rrf_and_preserves_structural_citations(
+    tmp_path: Path, monkeypatch
+) -> None:
+    settings = vector_settings(tmp_path)
+    search = KnowledgeSearch(FakeEngine(), settings)
+    lexical = [
+        {
+            "id": "sheet-row-17",
+            "source_type": "document",
+            "source_id": "doc-budget",
+            "collection_id": "atlas",
+            "title": "预算与SLA",
+            "section": "SLA矩阵",
+            "page": None,
+            "content": "订单创建接口 P95 目标为 800ms。",
+            "structure_type": "table",
+            "sheet": "SLA矩阵",
+            "row_start": 17,
+            "row_end": 17,
+            "slide": None,
+            "sources": [],
+            "lexical_score": 9.5,
+        }
+    ]
+    monkeypatch.setattr(search, "_lexical_candidates", lambda *_args, **_kwargs: lexical)
+    monkeypatch.setattr(search, "_indexed_document_ids", lambda: {"doc-budget"})
+    monkeypatch.setattr(
+        search.vector_store,
+        "search_knowledge",
+        lambda *_args, **_kwargs: [
+            {
+                "id": "sheet-row-17",
+                "document": "订单创建接口 P95 目标为 800ms。",
+                "metadata": {
+                    "source_type": "document",
+                    "source_id": "doc-budget",
+                    "collection_id": "atlas",
+                    "title": "预算与SLA",
+                    "section": "SLA矩阵",
+                    "structure_type": "table",
+                    "sheet": "SLA矩阵",
+                    "row_start": 17,
+                    "row_end": 17,
+                },
+                "vector_score": 0.91,
+            }
+        ],
+    )
+
+    results = search.search("订单创建 P95", source_types=["document"])
+
+    assert results[0]["retrieval"] == "hybrid"
+    assert results[0]["rrf_score"] > 0
+    assert results[0]["structure_type"] == "table"
+    assert results[0]["sheet"] == "SLA矩阵"
+    assert results[0]["row_start"] == 17
+
+
+def test_wiki_lexical_candidates_align_with_markdown_section_vector_ids(
+    tmp_path: Path, monkeypatch
+) -> None:
+    settings = vector_settings(tmp_path)
+    search = KnowledgeSearch(FakeEngine(), settings)
+    page = WikiPage(
+        id="wiki-atlas",
+        path="atlas/operations.md",
+        title="Atlas运维知识",
+        content="# Atlas运维知识\n\n## 蓝绿切换\n\n切换窗口为每周三 22:30。",
+        sources_json='["document://runbook#section=蓝绿切换"]',
+        created_by="admin",
+    )
+    monkeypatch.setattr(search, "_wiki_fulltext_pages", lambda *_args: [page])
+
+    candidates = search._wiki_lexical_candidates(["蓝绿", "切换"], limit=10)
+
+    section = next(item for item in candidates if "蓝绿切换" in item["section"])
+    assert section["id"] == "wiki:wiki-atlas:1"
+    assert section["sources"] == ["document://runbook#section=蓝绿切换"]
+    assert section["structure_type"] == "section"
+
+
+def test_knowledge_search_drops_zero_similarity_vector_only_candidates(
+    tmp_path: Path, monkeypatch
+) -> None:
+    settings = vector_settings(tmp_path)
+    search = KnowledgeSearch(FakeEngine(), settings)
+    monkeypatch.setattr(search, "_lexical_candidates", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(search, "_indexed_document_ids", lambda: {"unrelated-doc"})
+    monkeypatch.setattr(
+        search.vector_store,
+        "search_knowledge",
+        lambda *_args, **_kwargs: [
+            {
+                "id": "zero-similarity",
+                "document": "Unrelated evidence.",
+                "metadata": {
+                    "source_type": "document",
+                    "source_id": "unrelated-doc",
+                    "collection_id": "atlas",
+                    "title": "Unrelated",
+                    "section": "Other",
+                },
+                "vector_score": 0.0,
+            }
+        ],
+    )
+
+    assert search.search("missing fact", source_types=["document"]) == []
+
+
+def test_document_lexical_scores_cannot_starve_the_wiki_lexical_lane(
+    tmp_path: Path, monkeypatch
+) -> None:
+    settings = vector_settings(tmp_path)
+    search = KnowledgeSearch(FakeEngine(), settings)
+    documents = [
+        {
+            "id": f"document-{index}",
+            "source_type": "document",
+            "source_id": f"doc-{index}",
+            "collection_id": "atlas",
+            "title": "Document",
+            "section": "Section",
+            "page": None,
+            "content": "document evidence",
+            "structure_type": "section",
+            "sheet": "",
+            "row_start": None,
+            "row_end": None,
+            "slide": None,
+            "sources": [],
+            "lexical_score": float(1000 - index),
+        }
+        for index in range(30)
+    ]
+    wiki = {
+        "id": "wiki-first",
+        "source_type": "wiki",
+        "source_id": "wiki-1",
+        "collection_id": "",
+        "title": "Wiki",
+        "section": "Decision",
+        "page": None,
+        "path": "atlas/decision.md",
+        "content": "wiki evidence",
+        "structure_type": "section",
+        "sheet": "",
+        "row_start": None,
+        "row_end": None,
+        "slide": None,
+        "sources": ["document://decision"],
+        "lexical_score": 1.0,
+    }
+    monkeypatch.setattr(
+        search, "_document_lexical_candidates", lambda *_args, **_kwargs: documents
+    )
+    monkeypatch.setattr(
+        search, "_wiki_lexical_candidates", lambda *_args, **_kwargs: [wiki]
+    )
+    monkeypatch.setattr(search, "_indexed_document_ids", lambda: {f"doc-{i}" for i in range(30)})
+    monkeypatch.setattr(search.vector_store, "search_knowledge", lambda *_args, **_kwargs: [])
+
+    results = search.search(
+        "shared evidence",
+        source_types=["document", "wiki"],
+        limit=10,
+    )
+
+    assert any(item["id"] == "wiki-first" for item in results)
+    assert next(item for item in results if item["id"] == "wiki-first")["source_rank"] == 1

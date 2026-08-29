@@ -86,7 +86,11 @@ class ChatService:
                 f"[{index}] source={source_type} title={item.get('title', '')} "
                 f"section={item.get('section', '')} path={item.get('path', '')} "
                 f"page={item.get('page') or '-'} lines="
-                f"{item.get('start_line', 0)}-{item.get('end_line', 0)}\n{snippet}"
+                f"{item.get('start_line', 0)}-{item.get('end_line', 0)} "
+                f"structure={item.get('structure_type', '')} "
+                f"sheet={item.get('sheet', '')} rows="
+                f"{item.get('row_start') or '-'}-{item.get('row_end') or '-'} "
+                f"slide={item.get('slide') or '-'}\n{snippet}"
             )
             if len(block) > budget:
                 break
@@ -144,4 +148,10 @@ class ChatService:
             "external_source_id": item.get("external_source_id", ""),
             "external_id": item.get("external_id", ""),
             "source_url": item.get("source_url", ""),
+            "structure_type": item.get("structure_type", ""),
+            "sheet": item.get("sheet", ""),
+            "row_start": item.get("row_start"),
+            "row_end": item.get("row_end"),
+            "slide": item.get("slide"),
+            "sources": item.get("sources", []),
         }

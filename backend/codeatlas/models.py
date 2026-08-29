@@ -156,6 +156,16 @@ class ExternalSourceItem(SQLModel, table=True):
 
 
 class WikiPage(SQLModel, table=True):
+    __table_args__ = (
+        Index(
+            "ft_wikipage_search",
+            "title",
+            "content",
+            mysql_prefix="FULLTEXT",
+            mysql_with_parser="ngram",
+        ),
+    )
+
     id: str = Field(default_factory=new_id, primary_key=True, max_length=32)
     path: str = Field(index=True, max_length=500)
     title: str = Field(max_length=300)

@@ -134,7 +134,84 @@ def test_chat_uses_unified_document_and_wiki_evidence(settings, monkeypatch) -> 
         "external_source_id": "source-1",
         "external_id": "page-1",
         "source_url": "https://notion.so/page-1",
+        "structure_type": "",
+        "sheet": "",
+        "row_start": None,
+        "row_end": None,
+        "slide": None,
+        "sources": [],
     }
+
+
+def test_chat_context_and_citation_include_spreadsheet_coordinates(
+    settings, monkeypatch
+) -> None:
+    class StructuredRetriever:
+        def search_knowledge(self, *_args, **_kwargs):
+            return [
+                {
+                    "source_type": "document",
+                    "source_id": "budget-doc",
+                    "title": "预算与SLA",
+                    "section": "SLA矩阵",
+                    "content": "订单创建接口P95目标为800ms。",
+                    "score": 0.8,
+                    "structure_type": "table",
+                    "sheet": "SLA矩阵",
+                    "row_start": 17,
+                    "row_end": 17,
+                    "slide": None,
+                    "sources": [],
+                }
+            ]
+
+    provider = type(
+        "Provider",
+        (),
+        {"base_url": "https://llm.example/v1", "api_key": "test", "model": "test"},
+    )()
+    service = ChatService(settings, StructuredRetriever(), provider)
+    monkeypatch.setattr(service, "_complete", lambda messages: messages[-1]["content"])
+
+    result = service.ask("订单SLA是多少？", None)
+
+    assert "sheet=SLA矩阵 rows=17-17" in result["answer"]
+    assert result["citations"][0]["structure_type"] == "table"
+    assert result["citations"][0]["sheet"] == "SLA矩阵"
+    assert result["citations"][0]["row_start"] == 17
+
+
+def test_chat_does_not_send_wiki_source_identifiers_to_external_llm(
+    settings, monkeypatch
+) -> None:
+    private_source = "https://internal.example/wiki?signature=private-token"
+
+    class WikiRetriever:
+        def search_knowledge(self, *_args, **_kwargs):
+            return [
+                {
+                    "source_type": "wiki",
+                    "source_id": "wiki-1",
+                    "title": "Current baseline",
+                    "section": "Risk",
+                    "content": "Kafka backlog is above target.",
+                    "sources": [private_source],
+                    "score": 0.8,
+                }
+            ]
+
+    provider = type(
+        "Provider",
+        (),
+        {"base_url": "https://llm.example/v1", "api_key": "test", "model": "test"},
+    )()
+    service = ChatService(settings, WikiRetriever(), provider)
+    monkeypatch.setattr(service, "_complete", lambda messages: messages[-1]["content"])
+
+    result = service.ask("当前风险是什么？", None)
+
+    assert private_source not in result["answer"]
+    assert result["citations"][0]["sources"] == [private_source]
 
 
 def test_repository_tree_lists_entries(

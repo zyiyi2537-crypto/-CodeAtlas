@@ -145,6 +145,12 @@ export interface ChatCitation {
   external_source_id: string
   external_id: string
   source_url: string
+  structure_type: string
+  sheet: string
+  row_start: number | null
+  row_end: number | null
+  slide: number | null
+  sources: string[]
 }
 
 export interface ChatResponse {

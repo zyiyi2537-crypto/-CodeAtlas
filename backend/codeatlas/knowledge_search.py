@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
+from sqlalchemy import text
 from sqlmodel import Session, col, select
 
 from .documents import StructuredBlock, split_structured_blocks
 from .embeddings import EmbeddingClient
 from .models import Document, DocumentChunkRecord, EmbeddingProfile, WikiPage
+from .ranking import RRF_K
 from .settings import Settings
 from .vector_store import KnowledgeVectorChunk, VectorStore
 
@@ -70,6 +72,184 @@ class KnowledgeSearch:
             raise ValueError("query must contain between 1 and 500 characters")
         return [term.lower() for term in normalized.split() if term.strip()]
 
+    @staticmethod
+    def _boolean_query(terms: list[str]) -> str:
+        return " ".join(f'"{term.replace(chr(34), "")}"' for term in terms[:12])
+
+    @staticmethod
+    def _structure_fields(metadata: dict) -> dict:
+        sources = metadata.get("sources", [])
+        if not sources and metadata.get("sources_json"):
+            try:
+                sources = json.loads(str(metadata["sources_json"]))
+            except json.JSONDecodeError:
+                sources = []
+        def coordinate(name: str) -> int | None:
+            value = metadata.get(name)
+            return int(str(value)) if value not in {None, "", 0, "0"} else None
+
+        return {
+            "structure_type": metadata.get("structure_type", ""),
+            "sheet": metadata.get("sheet", ""),
+            "row_start": coordinate("row_start"),
+            "row_end": coordinate("row_end"),
+            "slide": coordinate("slide"),
+            "sources": sources if isinstance(sources, list) else [],
+        }
+
+    def _document_lexical_candidates(
+        self,
+        terms: list[str],
+        collection_ids: list[str] | tuple[str, ...] | None,
+        limit: int,
+    ) -> list[dict]:
+        if not terms:
+            return []
+        clauses = ["d.status = 'indexed'"]
+        parameters: dict[str, str | int] = {
+            "query": self._boolean_query(terms),
+            "limit": limit,
+        }
+        if collection_ids:
+            placeholders = []
+            for index, collection_id in enumerate(collection_ids):
+                key = f"collection_{index}"
+                placeholders.append(f":{key}")
+                parameters[key] = collection_id
+            clauses.append(f"c.collection_id IN ({','.join(placeholders)})")
+        statement = text(f"""
+            SELECT c.*,
+                   MATCH(c.title, c.section, c.content)
+                   AGAINST (:query IN BOOLEAN MODE) AS lexical_rank
+            FROM documentchunkrecord c
+            JOIN document d ON d.id = c.document_id
+            WHERE {' AND '.join(clauses)}
+              AND MATCH(c.title, c.section, c.content)
+                  AGAINST (:query IN BOOLEAN MODE)
+            ORDER BY lexical_rank DESC
+            LIMIT :limit
+        """)
+        with self.engine.connect() as connection:
+            rows = connection.execute(statement, parameters).mappings().all()
+        candidates = []
+        for row in rows:
+            metadata = json.loads(row["metadata_json"] or "{}")
+            candidates.append(
+                {
+                    "id": row["id"],
+                    "source_type": "document",
+                    "source_id": row["document_id"],
+                    "collection_id": row["collection_id"],
+                    "title": row["title"],
+                    "section": row["section"],
+                    "page": row["page"],
+                    "content": row["content"],
+                    "external_provider": metadata.get("external_provider", ""),
+                    "external_source_id": metadata.get("external_source_id", ""),
+                    "external_id": metadata.get("external_id", ""),
+                    "source_url": metadata.get("source_url", ""),
+                    "external_path": metadata.get("external_path", ""),
+                    **self._structure_fields(
+                        {"structure_type": row["structure_type"], **metadata}
+                    ),
+                    "lexical_score": float(row["lexical_rank"] or 0),
+                }
+            )
+        return candidates
+
+    def _wiki_fulltext_pages(self, terms: list[str], limit: int) -> list[WikiPage]:
+        if not terms:
+            return []
+        statement = text("""
+            SELECT id
+            FROM wikipage
+            WHERE status = 'published'
+              AND MATCH(title, content) AGAINST (:query IN BOOLEAN MODE)
+            ORDER BY MATCH(title, content) AGAINST (:query IN BOOLEAN MODE) DESC
+            LIMIT :limit
+        """)
+        with self.engine.connect() as connection:
+            ids = [
+                str(row[0])
+                for row in connection.execute(
+                    statement,
+                    {"query": self._boolean_query(terms), "limit": limit},
+                ).all()
+            ]
+        if not ids:
+            return []
+        with Session(self.engine) as session:
+            pages = session.exec(select(WikiPage).where(col(WikiPage.id).in_(ids))).all()
+        by_id = {page.id: page for page in pages}
+        return [by_id[page_id] for page_id in ids if page_id in by_id]
+
+    def _wiki_lexical_candidates(self, terms: list[str], limit: int) -> list[dict]:
+        candidates = []
+        for page in self._wiki_fulltext_pages(terms, limit):
+            sources = json.loads(page.sources_json or "[]")
+            chunks = split_structured_blocks(
+                page.title,
+                self._wiki_blocks(page),
+            )
+            for chunk_index, chunk in enumerate(chunks, start=1):
+                score = self._lexical_score(
+                    terms,
+                    f"{page.title} {chunk.section} {chunk.content}",
+                )
+                if not score:
+                    continue
+                candidates.append(
+                    {
+                        "id": f"wiki:{page.id}:{chunk_index}",
+                        "source_type": "wiki",
+                        "source_id": page.id,
+                        "collection_id": "",
+                        "title": page.title,
+                        "section": chunk.section,
+                        "page": chunk.page,
+                        "path": page.path,
+                        "sources": sources,
+                        "content": chunk.content,
+                        "structure_type": chunk.structure_type,
+                        "sheet": "",
+                        "row_start": None,
+                        "row_end": None,
+                        "slide": chunk.metadata.get("slide"),
+                        "lexical_score": float(score),
+                    }
+                )
+        return sorted(
+            candidates,
+            key=lambda candidate: float(candidate["lexical_score"]),
+            reverse=True,
+        )[:limit]
+
+    def _lexical_candidates(
+        self,
+        terms: list[str],
+        wanted: list[str],
+        collection_ids: list[str] | tuple[str, ...] | None,
+        limit: int,
+    ) -> list[dict]:
+        candidates: list[dict] = []
+        if "document" in wanted:
+            for rank, candidate in enumerate(
+                self._document_lexical_candidates(terms, collection_ids, limit),
+                start=1,
+            ):
+                candidates.append(
+                    {**candidate, "lexical_rank": rank, "source_rank": rank}
+                )
+        if "wiki" in wanted:
+            for rank, candidate in enumerate(
+                self._wiki_lexical_candidates(terms, limit),
+                start=1,
+            ):
+                candidates.append(
+                    {**candidate, "lexical_rank": rank, "source_rank": rank}
+                )
+        return candidates
+
     def _document_rows(
         self, collection_ids: list[str] | tuple[str, ...] | None = None
     ) -> list[DocumentChunkRecord]:
@@ -123,6 +303,10 @@ class KnowledgeSearch:
                         "page": chunk.page or 0,
                         "structure_type": chunk.structure_type,
                         "ordinal": int(metadata.get("ordinal", 0)),
+                        "sheet": str(metadata.get("sheet", "")),
+                        "row_start": int(metadata.get("row_start", 0) or 0),
+                        "row_end": int(metadata.get("row_end", 0) or 0),
+                        "slide": int(metadata.get("slide", 0) or 0),
                         "external_provider": str(metadata.get("external_provider", "")),
                         "external_source_id": str(metadata.get("external_source_id", "")),
                         "external_id": str(metadata.get("external_id", "")),
@@ -151,6 +335,7 @@ class KnowledgeSearch:
                     "page": 0,
                     "structure_type": chunk.structure_type,
                     "path": page.path,
+                    "sources_json": page.sources_json,
                 },
             )
             for index, chunk in enumerate(chunks, start=1)
@@ -190,51 +375,35 @@ class KnowledgeSearch:
         context = self._context
         terms = self._terms(query)
         wanted = source_types or ["document", "wiki"]
-        lexical: dict[str, dict] = {}
-        if "document" in wanted:
-            for row in self._document_rows(collection_ids):
-                metadata = json.loads(row.metadata_json or "{}")
-                score = self._lexical_score(terms, f"{row.title} {row.section} {row.content}")
-                if score:
-                    lexical[row.id] = {
-                        "id": row.id,
-                        "source_type": "document",
-                        "source_id": row.document_id,
-                        "collection_id": row.collection_id,
-                        "title": row.title,
-                        "section": row.section,
-                        "page": row.page,
-                        "content": row.content,
-                        "external_provider": metadata.get("external_provider", ""),
-                        "external_source_id": metadata.get("external_source_id", ""),
-                        "external_id": metadata.get("external_id", ""),
-                        "source_url": metadata.get("source_url", ""),
-                        "external_path": metadata.get("external_path", ""),
-                        "lexical_score": score,
-                    }
-        if "wiki" in wanted:
-            for page in self._wiki_rows():
-                score = self._lexical_score(terms, f"{page.title} {page.content}")
-                if score:
-                    lexical[f"wiki:{page.id}:1"] = {
-                        "id": f"wiki:{page.id}:1",
-                        "source_type": "wiki",
-                        "source_id": page.id,
-                        "collection_id": "",
-                        "title": page.title,
-                        "section": page.path,
-                        "page": None,
-                        "path": page.path,
-                        "sources": json.loads(page.sources_json),
-                        "content": page.content,
-                        "lexical_score": score,
-                    }
-        vector = context.vector_store.search_knowledge(
-            context.embedder.embed([query])[0],
-            wanted,
-            max(limit * 3, 20),
-            list(collection_ids) if collection_ids else None,
+        lexical = self._lexical_candidates(
+            terms, wanted, collection_ids, max(limit * 3, 20)
         )
+        candidate_limit = max(limit * 3, 20)
+        query_embedding = context.embedder.embed([query])[0]
+        vector: list[dict] = []
+        for source_type in ("document", "wiki"):
+            if source_type not in wanted:
+                continue
+            lane = context.vector_store.search_knowledge(
+                query_embedding,
+                [source_type],
+                candidate_limit,
+                (
+                    list(collection_ids)
+                    if source_type == "document" and collection_ids
+                    else None
+                ),
+            )
+            lane = [
+                candidate
+                for candidate in lane
+                if float(candidate.get("vector_score", 0)) > 0
+                and candidate.get("metadata", {}).get("source_type") == source_type
+            ]
+            for rank, candidate in enumerate(lane, start=1):
+                vector.append(
+                    {**candidate, "vector_rank": rank, "source_rank": rank}
+                )
         if "document" in wanted:
             indexed_document_ids = self._indexed_document_ids()
             vector = [
@@ -243,8 +412,15 @@ class KnowledgeSearch:
                 if candidate["metadata"].get("source_type") != "document"
                 or candidate["metadata"].get("source_id") in indexed_document_ids
             ]
-        pool: dict[str, dict] = dict(lexical)
-        for rank, candidate in enumerate(vector, start=1):
+        pool: dict[str, dict] = {}
+        for fallback_rank, candidate in enumerate(lexical, start=1):
+            rank = int(candidate.get("lexical_rank", fallback_rank))
+            item = pool.setdefault(candidate["id"], {**candidate, "rrf_score": 0.0})
+            item["rrf_score"] += 0.9 / (RRF_K + rank)
+            item["lexical_rank"] = rank
+            item.setdefault("source_rank", rank)
+        for fallback_rank, candidate in enumerate(vector, start=1):
+            rank = int(candidate.get("vector_rank", fallback_rank))
             metadata = candidate["metadata"]
             item = pool.setdefault(
                 candidate["id"],
@@ -264,10 +440,17 @@ class KnowledgeSearch:
                     "external_path": metadata.get("external_path", ""),
                     "content": candidate["document"],
                     "lexical_score": 0,
+                    "rrf_score": 0.0,
+                    "source_rank": int(candidate.get("source_rank", rank)),
+                    **self._structure_fields(metadata),
                 },
             )
             item["vector_score"] = candidate["vector_score"]
             item["vector_rank"] = rank
+            item["rrf_score"] += 1.0 / (RRF_K + rank)
+            for key, value in self._structure_fields(metadata).items():
+                if item.get(key) in (None, "", []) and value not in (None, "", []):
+                    item[key] = value
         for item in pool.values():
             vector_score = float(item.get("vector_score", 0))
             lexical_score = float(item.get("lexical_score", 0))
@@ -276,7 +459,7 @@ class KnowledgeSearch:
                 if vector_score and lexical_score
                 else "vector" if vector_score else "lexical"
             )
-            item["score"] = vector_score + min(1.0, lexical_score / 5.0)
+            item["score"] = float(item["rrf_score"])
         return sorted(pool.values(), key=lambda item: item["score"], reverse=True)[:limit]
 
     @staticmethod

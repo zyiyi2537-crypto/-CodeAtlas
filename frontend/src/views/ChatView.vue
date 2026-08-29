@@ -330,7 +330,15 @@ function closeModelSettings() {
                   {{ citation.source_type === 'wiki' ? 'Wiki' : '文档' }} · {{ citation.title }}
                   <span v-if="citation.external_provider"> · {{ citation.external_provider }}</span>
                   <span v-if="citation.section"> · {{ citation.section }}</span>
-                  <span v-if="citation.page"> · 第 {{ citation.page }} 页</span>
+                  <span v-if="citation.sheet">
+                    · 工作表 {{ citation.sheet }}
+                    <template v-if="citation.row_start"> 行 {{ citation.row_start }}–{{ citation.row_end ?? citation.row_start }}</template>
+                  </span>
+                  <span v-else-if="citation.slide"> · 第 {{ citation.slide }} 张幻灯片</span>
+                  <span v-else-if="citation.page"> · 第 {{ citation.page }} 页</span>
+                  <span v-if="citation.source_type === 'wiki' && citation.sources?.length">
+                    · {{ citation.sources.length }} 条来源
+                  </span>
                 </template>
               </span>
             </button>

@@ -11,7 +11,7 @@ from sqlmodel import Session, col, select
 from .chunker import read_text
 from .embeddings import EmbeddingClient, settings_for_profile
 from .models import EmbeddingProfile, Repository, RepositoryAccess, User
-from .ranking import fuse_and_rerank, tokenize
+from .ranking import fuse_and_rerank, rerank_across_source_types, tokenize
 from .security import redact_secrets, resolve_repository_file
 from .settings import Settings
 from .vector_store import VectorStore, code_generation_namespace
@@ -162,7 +162,11 @@ class CodeRetriever:
                 )
             )
         return sorted(
-            candidates,
+            [
+                candidate
+                for candidate in candidates
+                if float(candidate.get("vector_score", 0)) > 0
+            ],
             key=lambda candidate: float(candidate.get("vector_score", 0)),
             reverse=True,
         )[:candidate_limit]
@@ -252,11 +256,10 @@ class CodeRetriever:
             }
             for item in code_results
         ]
-        return sorted(
+        return rerank_across_source_types(
             [*normalized_code, *knowledge_results],
-            key=lambda item: float(item.get("score", 0)),
-            reverse=True,
-        )[:limit]
+            limit,
+        )
 
     def _lexical_candidates(
         self, query: str, generation_ids: list[str], limit: int

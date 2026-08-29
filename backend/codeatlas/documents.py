@@ -13,6 +13,7 @@ from docx import Document as DocxDocument
 from docx.table import Table as DocxTable
 from docx.text.paragraph import Paragraph as DocxParagraph
 from openpyxl import load_workbook
+from openpyxl.utils.cell import range_boundaries
 from pptx import Presentation
 
 from .models import DocumentChunkRecord
@@ -193,39 +194,168 @@ def _docx_blocks(content: bytes) -> list[StructuredBlock]:
     return blocks
 
 
+def _xlsx_table_blocks(
+    sheet, table_name: str, reference: str, ordinal: int, rows_per_block: int
+) -> tuple[list[StructuredBlock], int]:
+    min_column, min_row, max_column, max_row = range_boundaries(reference)
+    rows = [
+        (
+            row_number,
+            [
+                "" if sheet.cell(row_number, column).value is None
+                else str(sheet.cell(row_number, column).value)
+                for column in range(min_column, max_column + 1)
+            ],
+        )
+        for row_number in range(min_row, max_row + 1)
+    ]
+    if not rows:
+        return [], ordinal
+    header = rows[0][1]
+    data = [(row_number, row) for row_number, row in rows[1:] if any(row)]
+    groups = [
+        data[offset : offset + rows_per_block]
+        for offset in range(0, len(data), rows_per_block)
+    ] or [[]]
+    blocks = []
+    for group in groups:
+        ordinal += 1
+        row_start = group[0][0] if group else min_row + 1
+        row_end = group[-1][0] if group else min_row
+        blocks.append(
+            StructuredBlock(
+                kind="table",
+                title=table_name,
+                text="\n".join(
+                    [" | ".join(header), *[" | ".join(row) for _, row in group]]
+                ),
+                hierarchy=(sheet.title, table_name),
+                ordinal=ordinal,
+                metadata={
+                    "sheet": sheet.title,
+                    "table": table_name,
+                    "header": header,
+                    "row_start": row_start,
+                    "row_end": row_end,
+                },
+            )
+        )
+    return blocks, ordinal
+
+
+def _xlsx_outside_table_blocks(
+    sheet,
+    covered_ranges: list[tuple[int, int, int, int]],
+    ordinal: int,
+    rows_per_block: int,
+) -> tuple[list[StructuredBlock], int]:
+    def covered(row: int, column: int) -> bool:
+        return any(
+            min_row <= row <= max_row and min_column <= column <= max_column
+            for min_column, min_row, max_column, max_row in covered_ranges
+        )
+
+    populated_rows: list[tuple[int, list[str]]] = []
+    for row_number in range(1, sheet.max_row + 1):
+        cells = []
+        for column in range(1, sheet.max_column + 1):
+            if covered(row_number, column):
+                continue
+            value = sheet.cell(row_number, column).value
+            if value is None or str(value).strip() == "":
+                continue
+            coordinate = sheet.cell(row_number, column).coordinate
+            cells.append(f"{coordinate}: {value}")
+        if cells:
+            populated_rows.append((row_number, cells))
+
+    groups: list[list[tuple[int, list[str]]]] = []
+    current: list[tuple[int, list[str]]] = []
+    for row in populated_rows:
+        if current and (row[0] != current[-1][0] + 1 or len(current) >= rows_per_block):
+            groups.append(current)
+            current = []
+        current.append(row)
+    if current:
+        groups.append(current)
+
+    blocks = []
+    for group in groups:
+        ordinal += 1
+        blocks.append(
+            StructuredBlock(
+                kind="sheet-cells",
+                title=sheet.title,
+                text="\n".join(" | ".join(cells) for _, cells in group),
+                hierarchy=(sheet.title, "Cells outside tables"),
+                ordinal=ordinal,
+                metadata={
+                    "sheet": sheet.title,
+                    "row_start": group[0][0],
+                    "row_end": group[-1][0],
+                },
+            )
+        )
+    return blocks, ordinal
+
+
 def _xlsx_blocks(content: bytes, rows_per_block: int = 50) -> list[StructuredBlock]:
-    workbook = load_workbook(BytesIO(content), data_only=False, read_only=True)
+    workbook = load_workbook(BytesIO(content), data_only=False, read_only=False)
     blocks: list[StructuredBlock] = []
     ordinal = 0
     for sheet in workbook.worksheets:
+        tables = sorted(sheet.tables.values(), key=lambda table: table.ref)
+        if tables:
+            covered_ranges = []
+            for table in tables:
+                covered_ranges.append(range_boundaries(table.ref))
+                table_blocks, ordinal = _xlsx_table_blocks(
+                    sheet,
+                    table.displayName,
+                    table.ref,
+                    ordinal,
+                    rows_per_block,
+                )
+                blocks.extend(table_blocks)
+            outside_blocks, ordinal = _xlsx_outside_table_blocks(
+                sheet,
+                covered_ranges,
+                ordinal,
+                rows_per_block,
+            )
+            blocks.extend(outside_blocks)
+            continue
         rows = [
-            ["" if value is None else str(value) for value in row]
-            for row in sheet.iter_rows(values_only=True)
+            (
+                row_number,
+                ["" if value is None else str(value) for value in row],
+            )
+            for row_number, row in enumerate(sheet.iter_rows(values_only=True), start=1)
         ]
-        rows = [row for row in rows if any(cell.strip() for cell in row)]
+        rows = [(row_number, row) for row_number, row in rows if any(cell.strip() for cell in row)]
         if not rows:
             continue
-        header, data = rows[0], rows[1:]
+        header, data = rows[0][1], rows[1:]
         groups = [
             data[offset : offset + rows_per_block]
             for offset in range(0, len(data), rows_per_block)
         ] or [[]]
-        for group_index, group in enumerate(groups, start=1):
+        for group in groups:
             ordinal += 1
             blocks.append(
                 StructuredBlock(
                     kind="table",
                     title=sheet.title,
                     text="\n".join(
-                        [" | ".join(header), *[" | ".join(row) for row in group]]
+                        [" | ".join(header), *[" | ".join(row) for _, row in group]]
                     ),
                     hierarchy=(sheet.title,),
                     ordinal=ordinal,
                     metadata={
                         "sheet": sheet.title,
                         "header": header,
-                        "row_start": 2 + (group_index - 1) * rows_per_block,
-                        "row_end": 1 + (group_index - 1) * rows_per_block + len(group),
+                        "row_start": group[0][0] if group else rows[0][0] + 1,
+                        "row_end": group[-1][0] if group else rows[0][0],
                     },
                 )
             )

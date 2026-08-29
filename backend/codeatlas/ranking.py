@@ -83,6 +83,51 @@ def fuse_and_rerank(
     return selected
 
 
+def rerank_across_source_types(results: list[dict], limit: int) -> list[dict]:
+    """Normalize independently ranked code, document and Wiki result lists."""
+    grouped: dict[str, list[dict]] = {}
+    for item in results:
+        grouped.setdefault(str(item.get("source_type", "code")), []).append(item)
+    normalized: list[dict] = []
+    for source_type in ("code", "document", "wiki"):
+        source_results = sorted(
+            grouped.pop(source_type, []),
+            key=lambda item: float(item.get("score", 0)),
+            reverse=True,
+        )
+        for rank, item in enumerate(source_results, start=1):
+            normalized.append(
+                {
+                    **item,
+                    "source_score": float(item.get("score", 0)),
+                    "source_rank": rank,
+                    "score": 1.0 / (RRF_K + rank),
+                }
+            )
+    for source_type in sorted(grouped):
+        for rank, item in enumerate(
+            sorted(
+                grouped[source_type],
+                key=lambda value: float(value.get("score", 0)),
+                reverse=True,
+            ),
+            start=1,
+        ):
+            normalized.append(
+                {
+                    **item,
+                    "source_score": float(item.get("score", 0)),
+                    "source_rank": rank,
+                    "score": 1.0 / (RRF_K + rank),
+                }
+            )
+    return sorted(
+        normalized,
+        key=lambda item: float(item["score"]),
+        reverse=True,
+    )[:limit]
+
+
 def _overlaps(left: dict, right: dict) -> bool:
     if left.get("repo") != right.get("repo") or left.get("path") != right.get("path"):
         return False
