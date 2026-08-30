@@ -10,6 +10,30 @@ import AppShell from '@/components/AppShell.vue'
 const EmptyView = { template: '<div />' }
 
 describe('AppShell', () => {
+  it('renders the CodeAtlas brand mark in the global header', async () => {
+    const { state } = useAuth()
+    state.user = null
+    state.csrfToken = ''
+    state.initialized = true
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: EmptyView }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const wrapper = mount(AppShell, {
+      global: { plugins: [router] },
+    })
+    const brand = wrapper.get('a[aria-label="CodeAtlas 控制台首页"]')
+    const logo = brand.get('img.brand-logo')
+
+    expect(logo.attributes('src')).toContain('codeatlas-mark.svg')
+    expect(logo.attributes('alt')).toBe('')
+    expect(brand.text()).toContain('CodeAtlas')
+  })
+
   it('renders every administration destination for an administrator', async () => {
     const { state } = useAuth()
     state.user = {

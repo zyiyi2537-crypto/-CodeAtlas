@@ -143,17 +143,11 @@ code,
   font-weight: 720;
 }
 
-.brand-mark {
-  width: 30px;
-  height: 30px;
-  display: grid;
-  place-items: center;
-  color: var(--paper);
-  background: #22303a;
-  border-radius: 3px;
-  font-family: var(--mono);
-  font-size: 12px;
-  font-weight: 500;
+.brand-logo {
+  width: 32px;
+  height: 32px;
+  display: block;
+  flex: 0 0 32px;
 }
 
 .topbar-actions,

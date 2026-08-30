@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" role="img" aria-labelledby="title desc">
+  <title id="title">CodeAtlas</title>
+  <desc id="desc">A code bracket and a connected letter A forming a map route.</desc>
+  <rect x="1" y="1" width="46" height="46" rx="8" fill="#22303a"/>
+  <path d="M17 13 9 24l8 11" fill="none" stroke="#f3f4f0" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="m22 34 7-20 9 20M25 27h10" fill="none" stroke="#f3f4f0" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="29" cy="14" r="3.25" fill="#c2401f"/>
+  <circle cx="35" cy="27" r="2.35" fill="#c2401f"/>
+</svg>

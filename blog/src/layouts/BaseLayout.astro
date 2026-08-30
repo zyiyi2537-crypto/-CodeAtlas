@@ -23,6 +23,7 @@ const imageUrl = new URL(image, Astro.site)
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#f5f7f8" />
+    <link rel="icon" href="/codeatlas-favicon.svg" type="image/svg+xml" />
     <title>{fullTitle}</title>
     <meta name="description" content={description} />
     <link rel="canonical" href={canonical} />
@@ -41,7 +42,7 @@ const imageUrl = new URL(image, Astro.site)
     <header class="site-header">
       <div class="header-inner">
         <a class="site-brand" href="/" aria-label="CodeAtlas 首页">
-          <span class="brand-symbol" aria-hidden="true">CA</span>
+          <img class="brand-logo" src="/codeatlas-mark.svg" alt="" width="32" height="32" />
           <span>CodeAtlas</span>
         </a>
         <nav aria-label="站点导航">
@@ -133,16 +134,11 @@ const imageUrl = new URL(image, Astro.site)
     font-weight: 760;
   }
 
-  .brand-symbol {
+  .brand-logo {
     width: 32px;
     height: 32px;
-    display: grid;
-    place-items: center;
-    color: #ffffff;
-    background: #1d2328;
-    border-radius: 5px;
-    font-family: "SFMono-Regular", Consolas, monospace;
-    font-size: 11px;
+    display: block;
+    flex: 0 0 32px;
   }
 
   .site-header nav,

@@ -6,7 +6,6 @@ import {
   Cpu,
   Database,
   FileText,
-  FileCode2,
   FolderTree,
   Gauge,
   KeyRound,
@@ -29,6 +28,7 @@ const route = useRoute()
 const router = useRouter()
 const { state, isAdmin } = useAuth()
 const menuOpen = ref(false)
+const logoUrl = `${import.meta.env.BASE_URL}codeatlas-mark.svg`
 
 const navigation = computed(() => {
   const items = [
@@ -106,7 +106,7 @@ async function signOutAll() {
   <div class="app-shell">
     <header class="topbar">
       <a class="brand" href="/" aria-label="CodeAtlas 控制台首页">
-        <span class="brand-mark"><FileCode2 :size="20" /></span>
+        <img class="brand-logo" :src="logoUrl" alt="" width="32" height="32" />
         <span>CodeAtlas</span>
       </a>
       <div class="topbar-actions">
