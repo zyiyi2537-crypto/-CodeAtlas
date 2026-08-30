@@ -2635,13 +2635,24 @@ fieldset small {
   }
 
   .mobile-menu-button {
+    width: 44px;
+    height: 44px;
+    min-height: 44px;
     display: inline-grid;
+    flex-basis: 44px;
+  }
+
+  .nav-item {
+    min-height: 44px;
   }
 
   .sidebar {
     z-index: 70;
     top: 56px;
+    bottom: auto;
     width: min(280px, calc(100vw - 52px));
+    height: calc(100vh - 56px);
+    height: calc(100dvh - 56px);
     transform: translateX(-105%);
     transition: transform 180ms ease;
   }
@@ -2657,10 +2668,11 @@ fieldset small {
   .menu-scrim {
     position: fixed;
     z-index: 60;
-    inset: 56px 0 0;
+    inset: 56px 0 auto;
     display: block;
     width: 100%;
     height: calc(100vh - 56px);
+    height: calc(100dvh - 56px);
     padding: 0;
     background: rgba(18, 24, 28, 0.35);
     border: 0;
@@ -2693,13 +2705,20 @@ fieldset small {
   }
 
   .search-form {
-    grid-template-columns: 25px minmax(0, 1fr) 38px;
+    grid-template-columns: 25px minmax(0, 1fr) 44px 44px;
+    gap: 8px;
     padding-left: 12px;
   }
 
+  .filter-button,
   .search-submit {
-    width: 38px;
-    min-width: 38px;
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    min-height: 44px;
+  }
+
+  .search-submit {
     padding: 0;
   }
 
@@ -2712,7 +2731,12 @@ fieldset small {
   }
 
   .filter-row {
-    grid-template-columns: 1fr 1fr 38px;
+    grid-template-columns: 1fr 1fr 44px;
+  }
+
+  .filter-row > .icon-button {
+    width: 44px;
+    height: 44px;
   }
 
   .path-filter {
@@ -2798,10 +2822,12 @@ fieldset small {
   .form-dialog,
   .secret-dialog {
     max-height: calc(100vh - 20px);
+    max-height: calc(100dvh - 20px);
   }
 
   .source-code {
     max-height: calc(100vh - 92px);
+    max-height: calc(100dvh - 92px);
     padding: 14px;
     font-size: 11px;
   }

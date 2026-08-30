@@ -200,6 +200,12 @@ const imageUrl = new URL(image, Astro.site)
       width: calc(100% - 28px);
     }
 
+    .site-brand,
+    .demo-link,
+    .footer-links a {
+      min-height: 44px;
+    }
+
     .site-header nav > a:not(.demo-link) {
       display: none;
     }
