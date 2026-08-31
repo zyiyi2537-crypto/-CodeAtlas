@@ -222,7 +222,7 @@ def test_background_job_enqueue_reuses_one_connection_for_named_locks(
     application, admin
 ) -> None:
     engine = create_engine(
-        str(application.state.engine.url),
+        application.state.engine.url,
         pool_size=1,
         max_overflow=0,
         pool_timeout=1,
