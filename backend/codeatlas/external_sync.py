@@ -15,6 +15,7 @@ from sqlmodel import Session, select
 
 from .connectors import MAX_EXTERNAL_ITEMS, ExternalItem, build_connector
 from .documents import chunk_document, extract_structured_blocks
+from .member_lifecycle_lock import member_lifecycle_lock
 from .models import (
     Document,
     DocumentChunkRecord,
@@ -248,7 +249,17 @@ class ExternalSourceSyncService:
             )
             for block in blocks
         ]
-        with Session(self.engine) as session:
+        with (
+            member_lifecycle_lock(self.engine) as connection,
+            Session(connection) as session,
+        ):
+            stored_source = session.exec(
+                select(ExternalSource)
+                .where(ExternalSource.id == source["id"])
+                .with_for_update()
+            ).first()
+            if stored_source is None:
+                raise LookupError(source["id"])
             existing_mapping = (
                 session.get(ExternalSourceItem, mapping.id) if mapping else None
             )
@@ -269,7 +280,7 @@ class ExternalSourceSyncService:
                 document.version += 1
             else:
                 document = Document(
-                    collection_id=source["collection_id"],
+                    collection_id=stored_source.collection_id,
                     title=item.title[:300],
                     original_filename=item.filename[:500],
                     mime_type=item.mime_type[:120],
@@ -277,7 +288,7 @@ class ExternalSourceSyncService:
                     version=1,
                     source_path="",
                     sha256="",
-                    created_by=source["created_by"],
+                    created_by=stored_source.created_by,
                 )
             document.title = item.title[:300]
             document.original_filename = item.filename[:500]

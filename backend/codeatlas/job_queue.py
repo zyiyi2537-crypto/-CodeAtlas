@@ -5,7 +5,8 @@ from dataclasses import dataclass
 
 from sqlmodel import Session, col, select
 
-from .index_job_schedule_lock import index_job_schedule_lock
+from .index_job_schedule_lock import index_job_schedule_connection_lock
+from .member_lifecycle_lock import member_lifecycle_lock
 from .models import IndexJob, Repository
 
 
@@ -39,6 +40,7 @@ class IndexJobQueue:
         *,
         skip_if_active: bool = False,
         skip_if_latest_commit: bool = False,
+        use_repository_owner: bool = False,
     ) -> IndexJob | None:
         repository = session.exec(
             select(Repository).where(Repository.id == request.repository_id).with_for_update()
@@ -68,7 +70,7 @@ class IndexJobQueue:
 
         job = IndexJob(
             repository_id=request.repository_id,
-            created_by=request.created_by,
+            created_by=repository.created_by if use_repository_owner else request.created_by,
             message=request.message,
             commit=request.commit,
         )
@@ -83,19 +85,22 @@ class IndexJobQueue:
         skip_if_active: bool = False,
         skip_if_latest_commit: bool = False,
     ) -> IndexJob | None:
-        with index_job_schedule_lock(self.engine):
-            with Session(self.engine) as session:
-                job = self.add(
-                    session,
-                    request,
-                    skip_if_active=skip_if_active,
-                    skip_if_latest_commit=skip_if_latest_commit,
-                )
-                session.commit()
-                if job is None:
-                    return None
-                session.refresh(job)
-                job_id = job.id
+        with member_lifecycle_lock(self.engine) as connection:
+            with index_job_schedule_connection_lock(connection):
+                with Session(connection) as session:
+                    job = self.add(
+                        session,
+                        request,
+                        skip_if_active=skip_if_active,
+                        skip_if_latest_commit=skip_if_latest_commit,
+                        use_repository_owner=True,
+                    )
+                    session.commit()
+                    if job is None:
+                        return None
+                    session.refresh(job)
+                    job_id = job.id
+                connection.commit()
             self.submit((job_id,))
             return job
 
