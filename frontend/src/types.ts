@@ -158,6 +158,34 @@ export interface ChatResponse {
   citations: ChatCitation[]
 }
 
+export interface ChatMessage {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  citations: ChatCitation[]
+  created_at: string
+}
+
+export interface ChatSessionSummary {
+  id: string
+  title: string
+  repository_ids: string[]
+  created_at: string
+  updated_at: string
+}
+
+export interface ChatSession extends ChatSessionSummary {
+  messages: ChatMessage[]
+}
+
+export interface UserMemory {
+  id: string
+  kind: 'preference' | 'project' | 'environment' | 'constraint' | 'fact'
+  content: string
+  created_at: string
+  updated_at: string
+}
+
 export interface ChatStatus {
   enabled: boolean
   model: string

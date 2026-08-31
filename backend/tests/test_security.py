@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from codeatlas.security import (
+    contains_secret,
     digest_secret,
     redact_secrets,
     resolve_repository_file,
@@ -76,6 +77,43 @@ def test_redaction_preserves_shape_and_removes_secrets() -> None:
     assert "BEGIN PRIVATE KEY" not in redacted
     assert digest_secret("token") != "token"
     assert redacted.count("\n") == source.count("\n")
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "my password is " + "hunter2",
+        "密码是" + "qa-password-2026",
+        "ghp_" + "a" * 36,
+        "github_pat_" + "a" * 30,
+        "AKIA" + "A" * 16,
+        "xoxb-" + "1" * 12 + "-" + "a" * 24,
+        ".".join(("eyJ" + "a" * 12, "b" * 16, "c" * 20)),
+        "glpat-" + "a" * 20,
+        "sk-proj-" + "a" * 40,
+        "sk_live_" + "a" * 24,
+        "hf_" + "a" * 34,
+        "AIza" + "a" * 35,
+        "AccountKey=" + "a" * 44,
+    ],
+)
+def test_secret_detection_covers_common_credential_formats(secret: str) -> None:
+    assert contains_secret(secret)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "密码使用 Argon2 哈希后保存。",
+        "Token 解析器会检查过期时间。",
+        "用户偏好用中文解释代码调用链。",
+        "Token is refreshed automatically.",
+        "The API key is stored in Vault.",
+        "password = Argon2 hashes are recommended.",
+    ],
+)
+def test_secret_detection_keeps_safe_memory_content(content: str) -> None:
+    assert not contains_secret(content)
 
 
 def test_repository_file_blocks_traversal_and_symlink_escape(tmp_path: Path) -> None:

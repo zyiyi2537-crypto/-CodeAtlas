@@ -34,6 +34,45 @@ class UserSession(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class ChatSession(SQLModel, table=True):
+    id: str = Field(default_factory=new_id, primary_key=True, max_length=32)
+    user_id: str = Field(foreign_key="user.id", index=True, max_length=32)
+    title: str = Field(default="新对话", max_length=200)
+    repository_ids_json: str = Field(default="[]", sa_column=Column(Text, nullable=False))
+    message_count: int = Field(default=0)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now, index=True)
+
+
+class ChatMessage(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("session_id", "sequence", name="uq_chat_message_sequence"),
+    )
+
+    id: str = Field(default_factory=new_id, primary_key=True, max_length=32)
+    session_id: str = Field(foreign_key="chatsession.id", index=True, max_length=32)
+    user_id: str = Field(foreign_key="user.id", index=True, max_length=32)
+    role: str = Field(max_length=20)
+    sequence: int
+    content: str = Field(sa_column=Column(Text, nullable=False))
+    citations_json: str = Field(default="[]", sa_column=Column(Text, nullable=False))
+    created_at: datetime = Field(default_factory=utc_now, index=True)
+
+
+class UserMemory(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("user_id", "kind", "content_hash", name="uq_user_memory_content"),
+    )
+
+    id: str = Field(default_factory=new_id, primary_key=True, max_length=32)
+    user_id: str = Field(foreign_key="user.id", index=True, max_length=32)
+    kind: str = Field(index=True, max_length=30)
+    content: str = Field(sa_column=Column(Text, nullable=False))
+    content_hash: str = Field(max_length=64)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now, index=True)
+
+
 class GitLabSource(SQLModel, table=True):
     id: str = Field(default_factory=new_id, primary_key=True, max_length=32)
     name: str = Field(index=True, unique=True, max_length=100)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextvars
 import json
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -13,7 +14,7 @@ from sqlmodel import Session, select
 
 from .database import create_database, initialize_database
 from .knowledge_search import KnowledgeSearch
-from .models import ApiToken
+from .models import ApiToken, User
 from .retrieval import CodeRetriever
 from .security import digest_secret
 from .settings import Settings
@@ -87,6 +88,9 @@ def resolve_token_identity(engine, raw_token: str) -> McpIdentity | None:
             or (token.expires_at and token.expires_at <= _utc_now())
         ):
             return None
+        owner = database.get(User, token.created_by)
+        if not owner or not owner.is_active:
+            return None
         return McpIdentity(
             scopes=frozenset(json.loads(token.scopes_json)),
             repository_ids=tuple(json.loads(token.repository_ids_json)),
@@ -98,6 +102,7 @@ def build_mcp(
     engine,
     retriever: CodeRetriever,
     default_identity: McpIdentity | None = None,
+    identity_resolver: Callable[[], McpIdentity | None] | None = None,
     knowledge_search: KnowledgeSearch | None = None,
 ):
     knowledge_search = knowledge_search or KnowledgeSearch(engine, settings)
@@ -117,7 +122,11 @@ def build_mcp(
     )
 
     def identity(required_scope: str) -> McpIdentity:
-        value = CURRENT_MCP_IDENTITY.get() or default_identity
+        value = CURRENT_MCP_IDENTITY.get()
+        if value is None and identity_resolver is not None:
+            value = identity_resolver()
+        if value is None:
+            value = default_identity
         if value is None or required_scope not in value.scopes:
             raise PermissionError(f"MCP token requires the {required_scope} scope")
         return value
@@ -255,6 +264,9 @@ def stdio_main() -> None:
         raise SystemExit("CODEATLAS_MCP_TOKEN must contain an active API token")
     retriever = CodeRetriever(settings, engine)
     mcp, _raw_app, _http_app = build_mcp(
-        settings, engine, retriever, default_identity=identity
+        settings,
+        engine,
+        retriever,
+        identity_resolver=lambda: resolve_token_identity(engine, raw_token),
     )
     mcp.run(transport="stdio")

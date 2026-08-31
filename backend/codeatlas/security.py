@@ -21,6 +21,25 @@ _PEM_BLOCK = re.compile(r"-----BEGIN [^-]+-----.*?-----END [^-]+-----", re.DOTAL
 _URL_CREDENTIALS = re.compile(r"(mysql|postgres|postgresql|mongodb|redis|https?)(\+[a-z]+)?://[^@]+@")
 _BEARER_TOKEN = re.compile(r"(?i)bearer\s+[a-zA-Z0-9_\-\.=]{20,}")
 _API_KEY_PATTERN = re.compile(r"(?i)(sk|pk|api|key|token|secret)[_-][a-zA-Z0-9]{20,}")
+_NATURAL_LANGUAGE_SECRET = re.compile(
+    r"(?i)(?P<label>my\s+password|password|passwd|pwd|api[ _-]?key|"
+    r"access[ _-]?key|secret|token|密码|口令|密钥)"
+    r"\s*(?:is|为|是|[:=])\s*[\"']?(?P<value>[^\s,;#\"'。]{6,})"
+)
+_GITHUB_TOKEN = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,})\b")
+_GITLAB_TOKEN = re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}\b")
+_OPENAI_PROJECT_KEY = re.compile(r"\bsk-proj-[A-Za-z0-9_-]{20,}\b")
+_STRIPE_KEY = re.compile(r"\b(?:sk|pk)_(?:live|test)_[A-Za-z0-9]{16,}\b")
+_HUGGINGFACE_TOKEN = re.compile(r"\bhf_[A-Za-z0-9]{20,}\b")
+_GOOGLE_API_KEY = re.compile(r"\bAIza[A-Za-z0-9_-]{30,}\b")
+_AZURE_ACCOUNT_KEY = re.compile(
+    r"(?i)\bAccountKey\s*=\s*[A-Za-z0-9+/]{32,}={0,2}"
+)
+_AWS_ACCESS_KEY = re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")
+_SLACK_TOKEN = re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b")
+_JWT_TOKEN = re.compile(
+    r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"
+)
 _SSH_GIT_URL = re.compile(
     r"^git@(?P<host>[A-Za-z0-9.-]+):"
     r"(?P<path>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*)\.git$"
@@ -74,6 +93,50 @@ def redact_secrets(text: str) -> str:
     text = _BEARER_TOKEN.sub("Bearer [REDACTED]", text)
     text = _API_KEY_PATTERN.sub(r"\1_[REDACTED]", text)
     return _ASSIGNMENT.sub(r"\1[REDACTED]", text)
+
+
+def contains_secret(text: str) -> bool:
+    """Return True when user-managed text contains a credential-like value."""
+
+    if (
+        _PEM_BLOCK.search(text)
+        or _URL_CREDENTIALS.search(text)
+        or _BEARER_TOKEN.search(text)
+        or _API_KEY_PATTERN.search(text)
+    ):
+        return True
+    if any(
+        pattern.search(text)
+        for pattern in (
+            _GITHUB_TOKEN,
+            _GITLAB_TOKEN,
+            _OPENAI_PROJECT_KEY,
+            _STRIPE_KEY,
+            _HUGGINGFACE_TOKEN,
+            _GOOGLE_API_KEY,
+            _AZURE_ACCOUNT_KEY,
+            _AWS_ACCESS_KEY,
+            _SLACK_TOKEN,
+            _JWT_TOKEN,
+        )
+    ):
+        return True
+    for match in _ASSIGNMENT.finditer(text):
+        value = match.group(2).strip("\"'")
+        if value.lower() not in {"argon2", "bcrypt", "scrypt", "vault"}:
+            return True
+    for match in _NATURAL_LANGUAGE_SECRET.finditer(text):
+        label = match.group("label").lower()
+        value = match.group("value")
+        if value.lower() in {"argon2", "bcrypt", "scrypt", "vault"}:
+            continue
+        if label.startswith("my ") or label in {"密码", "口令", "密钥"}:
+            return True
+        if len(value) >= 16 or any(character.isdigit() for character in value):
+            return True
+        if any(character in "_-./+=" for character in value):
+            return True
+    return False
 
 
 def validate_repository_name(name: str) -> str:

@@ -65,6 +65,8 @@ from .llm_provider_lock import LlmProviderLockError, llm_provider_lock
 from .models import (
     ApiToken,
     AuditEvent,
+    ChatMessage,
+    ChatSession,
     CodeChunkRecord,
     Document,
     DocumentChunkRecord,
@@ -78,12 +80,14 @@ from .models import (
     Repository,
     RepositoryAccess,
     User,
+    UserMemory,
     UserSession,
     WikiPage,
     new_id,
     utc_now,
 )
 from .security import (
+    contains_secret,
     digest_secret,
     hash_password,
     mask_credential_ref,
@@ -344,6 +348,20 @@ class ChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=1000)
     repository_ids: list[str] = Field(default_factory=list, max_length=20)
     history: list[ChatTurn] = Field(default_factory=list, max_length=6)
+
+
+class ChatSessionCreate(BaseModel):
+    title: str = Field(default="新对话", max_length=200)
+    repository_ids: list[str] = Field(default_factory=list, max_length=20)
+
+
+class ChatMessageCreate(BaseModel):
+    question: str = Field(min_length=1, max_length=1000)
+
+
+class UserMemoryCreate(BaseModel):
+    kind: str = Field(min_length=1, max_length=30)
+    content: str = Field(min_length=1, max_length=1000)
 
 
 class LlmProviderCreate(BaseModel):
@@ -2120,6 +2138,310 @@ def chat(payload: ChatRequest, request: Request):
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
 
 
+def _owned_chat_session(session: Session, session_id: str, user_id: str) -> ChatSession:
+    conversation = session.exec(
+        select(ChatSession).where(
+            ChatSession.id == session_id,
+            ChatSession.user_id == user_id,
+        )
+    ).first()
+    if not conversation:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Chat session not found")
+    return conversation
+
+
+def _serialize_chat_session(conversation: ChatSession) -> dict:
+    return {
+        "id": conversation.id,
+        "title": conversation.title,
+        "repository_ids": json.loads(conversation.repository_ids_json or "[]"),
+        "created_at": conversation.created_at,
+        "updated_at": conversation.updated_at,
+    }
+
+
+def _serialize_chat_message(message: ChatMessage) -> dict:
+    return {
+        "id": message.id,
+        "role": message.role,
+        "content": message.content,
+        "citations": json.loads(message.citations_json or "[]"),
+        "created_at": message.created_at,
+    }
+
+
+def _serialize_user_memory(memory: UserMemory) -> dict:
+    return {
+        "id": memory.id,
+        "kind": memory.kind,
+        "content": memory.content,
+        "created_at": memory.created_at,
+        "updated_at": memory.updated_at,
+    }
+
+
+@router.get("/memories")
+def list_user_memories(request: Request):
+    with database(request) as session:
+        identity = require_identity(request, session)
+        memories = session.exec(
+            select(UserMemory)
+            .where(UserMemory.user_id == identity.user.id)
+            .order_by(col(UserMemory.updated_at).desc())
+        ).all()
+        return [_serialize_user_memory(item) for item in memories]
+
+
+@router.post("/memories", status_code=201)
+def create_user_memory(payload: UserMemoryCreate, request: Request):
+    allowed_kinds = {"preference", "project", "environment", "constraint", "fact"}
+    with database(request) as session:
+        identity = require_identity(request, session)
+        require_csrf(request, identity)
+        kind = payload.kind.strip().lower()
+        content = payload.content.strip()
+        if kind not in allowed_kinds:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, "Invalid memory kind"
+            )
+        if contains_secret(content):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "Secrets and credentials cannot be stored as memory",
+            )
+        content_hash = digest_secret(content)
+        duplicate = session.exec(
+            select(UserMemory).where(
+                UserMemory.user_id == identity.user.id,
+                UserMemory.kind == kind,
+                UserMemory.content_hash == content_hash,
+            )
+        ).first()
+        if duplicate:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Memory already exists")
+        memory = UserMemory(
+            user_id=identity.user.id,
+            kind=kind,
+            content=content,
+            content_hash=content_hash,
+        )
+        session.add(memory)
+        audit(
+            session,
+            "memory.create",
+            "user_memory",
+            memory.id,
+            identity.user.id,
+        )
+        session.commit()
+        session.refresh(memory)
+        return _serialize_user_memory(memory)
+
+
+@router.delete("/memories/{memory_id}", status_code=204)
+def delete_user_memory(memory_id: str, request: Request):
+    with database(request) as session:
+        identity = require_identity(request, session)
+        require_csrf(request, identity)
+        memory = session.exec(
+            select(UserMemory).where(
+                UserMemory.id == memory_id,
+                UserMemory.user_id == identity.user.id,
+            )
+        ).first()
+        if not memory:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Memory not found")
+        audit(
+            session,
+            "memory.delete",
+            "user_memory",
+            memory.id,
+            identity.user.id,
+        )
+        session.delete(memory)
+        session.commit()
+
+
+@router.post("/chat/sessions", status_code=201)
+def create_chat_session(payload: ChatSessionCreate, request: Request):
+    with database(request) as session:
+        identity = require_identity(request, session)
+        require_csrf(request, identity)
+        conversation = ChatSession(
+            user_id=identity.user.id,
+            title=payload.title.strip()[:200] or "新对话",
+            repository_ids_json=json.dumps(payload.repository_ids),
+        )
+        session.add(conversation)
+        session.commit()
+        session.refresh(conversation)
+        return _serialize_chat_session(conversation)
+
+
+@router.get("/chat/sessions")
+def list_chat_sessions(request: Request):
+    with database(request) as session:
+        identity = require_identity(request, session)
+        conversations = session.exec(
+            select(ChatSession)
+            .where(ChatSession.user_id == identity.user.id)
+            .order_by(col(ChatSession.updated_at).desc())
+        ).all()
+        return [_serialize_chat_session(item) for item in conversations]
+
+
+@router.get("/chat/sessions/{session_id}")
+def get_chat_session(session_id: str, request: Request):
+    with database(request) as session:
+        identity = require_identity(request, session)
+        conversation = _owned_chat_session(session, session_id, identity.user.id)
+        messages = session.exec(
+            select(ChatMessage)
+            .where(
+                ChatMessage.session_id == conversation.id,
+                ChatMessage.user_id == identity.user.id,
+            )
+            .order_by(col(ChatMessage.sequence))
+        ).all()
+        return _serialize_chat_session(conversation) | {
+            "messages": [_serialize_chat_message(item) for item in messages]
+        }
+
+
+@router.delete("/chat/sessions/{session_id}", status_code=204)
+def delete_chat_session(session_id: str, request: Request):
+    with database(request) as session:
+        identity = require_identity(request, session)
+        require_csrf(request, identity)
+        conversation = _owned_chat_session(session, session_id, identity.user.id)
+        messages = session.exec(
+            select(ChatMessage).where(
+                ChatMessage.session_id == conversation.id,
+                ChatMessage.user_id == identity.user.id,
+            )
+        ).all()
+        for message in messages:
+            session.delete(message)
+        session.flush()
+        session.delete(conversation)
+        session.commit()
+
+
+@router.post("/chat/sessions/{session_id}/messages")
+def create_chat_message(
+    session_id: str, payload: ChatMessageCreate, request: Request
+):
+    client_ip = request.client.host if request.client else "unknown"
+    with database(request) as session:
+        identity = require_identity(request, session)
+        require_csrf(request, identity)
+        limiter.check(f"chat:{identity.user.id or client_ip}", 20)
+        conversation = _owned_chat_session(session, session_id, identity.user.id)
+        stored_messages = session.exec(
+            select(ChatMessage)
+            .where(
+                ChatMessage.session_id == conversation.id,
+                ChatMessage.user_id == identity.user.id,
+            )
+            .order_by(col(ChatMessage.sequence).desc())
+            .limit(6)
+        ).all()
+        history = [
+            {"role": item.role, "content": item.content}
+            for item in reversed(stored_messages)
+        ]
+        memories = session.exec(
+            select(UserMemory)
+            .where(UserMemory.user_id == identity.user.id)
+            .order_by(col(UserMemory.updated_at).desc())
+            .limit(20)
+        ).all()
+        provider = session.exec(select(LlmProvider).where(LlmProvider.is_active)).first()
+        provider_config = None
+        if provider:
+            provider_config = type(
+                "Provider",
+                (),
+                {
+                    "base_url": provider.base_url,
+                    "api_key": decrypt_api_key(
+                        request.app.state.settings.data_dir, provider
+                    ),
+                    "model": provider.model,
+                },
+            )()
+        service = ChatService(
+            request.app.state.settings,
+            request.app.state.retriever,
+            provider_config,
+        )
+        try:
+            result = service.ask(
+                payload.question,
+                identity.user,
+                json.loads(conversation.repository_ids_json or "[]") or None,
+                history,
+                [item.content for item in memories],
+            )
+        except ChatUnavailableError as exc:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+        _store_chat_exchange(
+            session,
+            conversation.id,
+            identity.user.id,
+            payload.question,
+            result,
+        )
+        session.commit()
+        return result
+
+
+def _store_chat_exchange(
+    session: Session,
+    session_id: str,
+    user_id: str,
+    question: str,
+    result: dict,
+) -> None:
+    conversation = session.exec(
+        select(ChatSession)
+        .where(
+            ChatSession.id == session_id,
+            ChatSession.user_id == user_id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).first()
+    if not conversation:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Chat session not found")
+    user_sequence = conversation.message_count + 1
+    assistant_sequence = conversation.message_count + 2
+    session.add_all(
+        [
+            ChatMessage(
+                session_id=conversation.id,
+                user_id=user_id,
+                role="user",
+                sequence=user_sequence,
+                content=question.strip(),
+            ),
+            ChatMessage(
+                session_id=conversation.id,
+                user_id=user_id,
+                role="assistant",
+                sequence=assistant_sequence,
+                content=str(result["answer"]),
+                citations_json=json.dumps(result["citations"], ensure_ascii=False),
+            ),
+        ]
+    )
+    conversation.message_count = assistant_sequence
+    conversation.updated_at = utc_now()
+    session.add(conversation)
+
+
 @router.get("/repositories/{repository_id}/tree")
 def get_tree(
     repository_id: str, request: Request, path: str = Query(default="", max_length=1000),
@@ -2253,6 +2575,12 @@ def update_member(user_id: str, payload: MemberUpdate, request: Request):
             user.role = payload.role
         if payload.is_active is not None:
             user.is_active = payload.is_active
+            if not payload.is_active:
+                browser_sessions = session.exec(
+                    select(UserSession).where(UserSession.user_id == user.id)
+                ).all()
+                for browser_session in browser_sessions:
+                    session.delete(browser_session)
         session.add(user)
         audit(session, "member.update", "user", user.id, identity.user.id)
         session.commit()
@@ -2269,8 +2597,61 @@ def delete_member(user_id: str, request: Request):
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Member not found")
         if user.id == identity.user.id:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Cannot delete yourself")
-        session.delete(user)
+
+        for model in (
+            GitLabSource,
+            GitHubSource,
+            DocumentCollection,
+            Document,
+            ExternalSource,
+            WikiPage,
+            EmbeddingProfile,
+            LlmProvider,
+            Repository,
+            IndexJob,
+        ):
+            for item in session.exec(
+                select(model).where(model.created_by == user.id)
+            ).all():
+                item.created_by = identity.user.id
+                session.add(item)
+
+        conversations = session.exec(
+            select(ChatSession).where(ChatSession.user_id == user.id)
+        ).all()
+        conversation_ids = [conversation.id for conversation in conversations]
+        if conversation_ids:
+            messages = session.exec(
+                select(ChatMessage).where(
+                    col(ChatMessage.session_id).in_(conversation_ids)
+                )
+            ).all()
+            for message in messages:
+                session.delete(message)
+            session.flush()
+        for conversation in conversations:
+            session.delete(conversation)
+
+        for memory in session.exec(
+            select(UserMemory).where(UserMemory.user_id == user.id)
+        ).all():
+            session.delete(memory)
+        for browser_session in session.exec(
+            select(UserSession).where(UserSession.user_id == user.id)
+        ).all():
+            session.delete(browser_session)
+        for access in session.exec(
+            select(RepositoryAccess).where(RepositoryAccess.user_id == user.id)
+        ).all():
+            session.delete(access)
+        for token in session.exec(
+            select(ApiToken).where(ApiToken.created_by == user.id)
+        ).all():
+            session.delete(token)
+
         audit(session, "member.delete", "user", user.id, identity.user.id)
+        session.flush()
+        session.delete(user)
         session.commit()
 
 

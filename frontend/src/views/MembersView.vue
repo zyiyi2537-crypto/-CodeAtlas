@@ -64,6 +64,15 @@ const deleteMember = useMutation({
     await queryClient.invalidateQueries({ queryKey: ['members'] })
   },
 })
+
+function removeMember(member: User) {
+  const confirmed = window.confirm(
+    `永久删除成员“${member.display_name}”？\n\n` +
+    '该账号的会话、消息、长期记忆、登录Session、仓库授权和个人Token都会清除；' +
+    '其创建的共享知识资产会转交给当前管理员。此操作不可撤销。',
+  )
+  if (confirmed) deleteMember.mutate(member.id)
+}
 </script>
 
 <template>
@@ -107,7 +116,7 @@ const deleteMember = useMutation({
               type="button"
               data-tooltip="删除成员"
               aria-label="删除成员"
-              @click="deleteMember.mutate(member.id)"
+              @click="removeMember(member)"
             >
               <Trash2 :size="17" />
             </button>
