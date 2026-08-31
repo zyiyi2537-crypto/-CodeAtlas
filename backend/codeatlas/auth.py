@@ -52,8 +52,7 @@ def create_browser_session(
         expires_at=utc_now() + timedelta(hours=12),
     )
     database.add(session)
-    database.commit()
-    database.refresh(session)
+    database.flush()
     response.set_cookie(
         SESSION_COOKIE,
         raw_token,
@@ -66,7 +65,12 @@ def create_browser_session(
     return BrowserIdentity(user=user, session=session)
 
 
-def resolve_identity(request: Request, database: Session) -> BrowserIdentity | None:
+def resolve_identity(
+    request: Request,
+    database: Session,
+    *,
+    lock_user: bool | None = None,
+) -> BrowserIdentity | None:
     cleanup_expired_sessions(database)
     raw_token = request.cookies.get(SESSION_COOKIE, "")
     if not raw_token:
@@ -81,21 +85,39 @@ def resolve_identity(request: Request, database: Session) -> BrowserIdentity | N
         expires_at = expires_at.replace(tzinfo=UTC)
     if expires_at <= utc_now():
         return None
-    user = database.get(User, browser_session.user_id)
+    user_statement = select(User).where(User.id == browser_session.user_id)
+    should_lock_user = (
+        request.method not in {"GET", "HEAD", "OPTIONS"}
+        if lock_user is None
+        else lock_user
+    )
+    if should_lock_user:
+        user_statement = user_statement.with_for_update()
+    user = database.exec(user_statement).first()
     if not user or not user.is_active:
         return None
     return BrowserIdentity(user=user, session=browser_session)
 
 
-def require_identity(request: Request, database: Session) -> BrowserIdentity:
-    identity = resolve_identity(request, database)
+def require_identity(
+    request: Request,
+    database: Session,
+    *,
+    lock_user: bool | None = None,
+) -> BrowserIdentity:
+    identity = resolve_identity(request, database, lock_user=lock_user)
     if not identity:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Authentication required")
     return identity
 
 
-def require_admin(request: Request, database: Session) -> BrowserIdentity:
-    identity = require_identity(request, database)
+def require_admin(
+    request: Request,
+    database: Session,
+    *,
+    lock_user: bool | None = None,
+) -> BrowserIdentity:
+    identity = require_identity(request, database, lock_user=lock_user)
     if identity.user.role != "admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Administrator role required")
     return identity

@@ -49,6 +49,7 @@ const memoryError = ref('')
 const showHistory = ref(false)
 const showMemory = ref(false)
 const memoryForm = reactive({ kind: 'preference', content: '' })
+let retryRequest: { sessionId: string; question: string; requestId: string } | null = null
 let sessionRequest = 0
 
 const repositories = useQuery({
@@ -108,6 +109,8 @@ async function scrollToBottom() {
 }
 
 async function selectSession(id: string) {
+  if (sending.value) return
+  retryRequest = null
   const request = ++sessionRequest
   activeSessionId.value = id
   loadingSession.value = true
@@ -127,6 +130,8 @@ async function selectSession(id: string) {
 }
 
 function startConversation() {
+  if (sending.value) return
+  retryRequest = null
   sessionRequest += 1
   activeSessionId.value = ''
   messages.value = []
@@ -135,7 +140,7 @@ function startConversation() {
   showHistory.value = false
 }
 
-async function ensureSession(question: string) {
+async function ensureSession(question: string, requestId: string) {
   if (activeSessionId.value) return activeSessionId.value
   const title = question.replace(/\s+/g, ' ').slice(0, 40) || '新对话'
   const { data } = await api.post<ChatSessionSummary>(
@@ -143,12 +148,18 @@ async function ensureSession(question: string) {
     {
       title,
       repository_ids: repositoryId.value ? [repositoryId.value] : [],
+      request_id: requestId,
     },
     { headers: csrfHeaders() },
   )
   activeSessionId.value = data.id
   await queryClient.invalidateQueries({ queryKey: ['chat-sessions'] })
   return data.id
+}
+
+function createRequestId() {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  return `request-${Date.now()}-${Math.random().toString(36).slice(2)}`
 }
 
 async function ask(question?: string) {
@@ -158,8 +169,13 @@ async function ask(question?: string) {
   chatError.value = ''
   draft.value = ''
   const optimisticMessageId = `local-user-${Date.now()}`
+  const requestScopeId = activeSessionId.value
+  const requestId = retryRequest?.sessionId === requestScopeId && retryRequest.question === text
+    ? retryRequest.requestId
+    : createRequestId()
+  let sessionId = ''
   try {
-    const sessionId = await ensureSession(text)
+    sessionId = await ensureSession(text, requestId)
     messages.value.push({
       id: optimisticMessageId,
       role: 'user',
@@ -170,9 +186,14 @@ async function ask(question?: string) {
     await scrollToBottom()
     const { data } = await api.post<ChatResponse>(
       `/chat/sessions/${sessionId}/messages`,
-      { question: text },
+      { question: text, request_id: requestId },
       { headers: csrfHeaders() },
     )
+    retryRequest = null
+    if (activeSessionId.value !== sessionId) {
+      await queryClient.invalidateQueries({ queryKey: ['chat-sessions'] })
+      return
+    }
     messages.value.push({
       id: `local-assistant-${Date.now()}`,
       role: 'assistant',
@@ -185,6 +206,11 @@ async function ask(question?: string) {
   } catch (error) {
     messages.value = messages.value.filter((message) => message.id !== optimisticMessageId)
     draft.value = text
+    retryRequest = {
+      sessionId: sessionId || requestScopeId,
+      question: text,
+      requestId,
+    }
     chatError.value = errorMessage(error)
   } finally {
     sending.value = false
@@ -192,6 +218,7 @@ async function ask(question?: string) {
 }
 
 async function deleteSession(item: ChatSessionSummary) {
+  if (sending.value) return
   if (!window.confirm(`删除对话“${item.title}”？此操作会同时删除全部消息。`)) return
   try {
     await api.delete(`/chat/sessions/${item.id}`, { headers: csrfHeaders() })
@@ -260,7 +287,7 @@ function openCitation(citation: ChatCitation) {
         <div><History :size="17" /><strong>历史对话</strong></div>
         <button class="icon-button mobile-panel-close" type="button" aria-label="关闭历史对话" @click="showHistory = false"><X :size="17" /></button>
       </header>
-      <button class="chat-new-session" type="button" @click="startConversation">
+      <button class="chat-new-session" type="button" :disabled="sending" @click="startConversation">
         <MessageSquarePlus :size="16" />新建对话
       </button>
       <div class="chat-session-list">
@@ -272,11 +299,11 @@ function openCitation(citation: ChatCitation) {
           class="chat-session-item"
           :class="{ active: item.id === activeSessionId }"
         >
-          <button class="chat-session-select" type="button" @click="selectSession(item.id)">
+          <button class="chat-session-select" type="button" :disabled="sending" @click="selectSession(item.id)">
             <strong>{{ item.title }}</strong>
             <span><Clock3 :size="12" />{{ formatDate(item.updated_at) }}</span>
           </button>
-          <button class="icon-button danger chat-session-delete" type="button" :aria-label="`删除对话 ${item.title}`" @click="deleteSession(item)"><Trash2 :size="14" /></button>
+          <button class="icon-button danger chat-session-delete" type="button" :aria-label="`删除对话 ${item.title}`" :disabled="sending" @click="deleteSession(item)"><Trash2 :size="14" /></button>
         </article>
       </div>
     </aside>

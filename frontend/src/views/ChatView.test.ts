@@ -197,7 +197,7 @@ describe('ChatView account workspace', () => {
     await vi.waitFor(() => {
       expect(apiPost).toHaveBeenCalledWith(
         '/chat/sessions/session-new/messages',
-        { question: '分析登录流程' },
+        { question: '分析登录流程', request_id: expect.any(String) },
         { headers: { 'X-CSRF-Token': 'csrf-test' } },
       )
     })
@@ -205,10 +205,46 @@ describe('ChatView account workspace', () => {
 
     expect(apiPost).toHaveBeenCalledWith(
       '/chat/sessions',
-      { title: '分析登录流程', repository_ids: [] },
+      { title: '分析登录流程', repository_ids: [], request_id: expect.any(String) },
       { headers: { 'X-CSRF-Token': 'csrf-test' } },
     )
+    const createPayload = apiPost.mock.calls.find(([url]) => url === '/chat/sessions')?.[1]
+    const messagePayload = apiPost.mock.calls.find(([url]) => url === '/chat/sessions/session-new/messages')?.[1]
+    expect(messagePayload.request_id).toBe(createPayload.request_id)
     expect(wrapper.get('.chat-thread').text()).toContain('持久回答')
+  })
+
+  it('reuses the request id when session creation response is lost', async () => {
+    const createPayloads: Array<{ request_id: string }> = []
+    let createAttempt = 0
+    apiPost.mockImplementation(async (url: string, payload?: { request_id: string }) => {
+      if (url === '/chat/sessions' && payload) {
+        createPayloads.push(payload)
+        createAttempt += 1
+        if (createAttempt === 1) throw new Error('会话已创建但响应丢失')
+        return { data: { ...sessionSummary, id: 'session-recovered' } }
+      }
+      if (url === '/chat/sessions/session-recovered/messages') {
+        return { data: { answer: '恢复后的回答', citations: [] } }
+      }
+      return { data: {} }
+    })
+    const wrapper = mountChat('member')
+    await flushPromises()
+    await wrapper.get('.chat-new-session').trigger('click')
+    const input = wrapper.get('textarea[aria-label="提问内容"]')
+    await input.setValue('创建会话也要幂等')
+    await wrapper.get('.chat-composer').trigger('submit')
+    await vi.waitFor(() => expect(wrapper.get('.error-banner').text()).toContain('会话已创建但响应丢失'))
+
+    await wrapper.get('.chat-composer').trigger('submit')
+    await vi.waitFor(() => expect(wrapper.get('.chat-thread').text()).toContain('恢复后的回答'))
+
+    expect(createPayloads).toHaveLength(2)
+    expect(createPayloads[0]?.request_id).toBeTruthy()
+    expect(createPayloads[1]?.request_id).toBe(createPayloads[0]?.request_id)
+    const messagePayload = apiPost.mock.calls.find(([url]) => url === '/chat/sessions/session-recovered/messages')?.[1]
+    expect(messagePayload.request_id).toBe(createPayloads[0]?.request_id)
   })
 
   it('restores the draft and removes optimistic history when sending fails', async () => {
@@ -229,6 +265,76 @@ describe('ChatView account workspace', () => {
 
     expect((input.element as HTMLTextAreaElement).value).toBe('请保留这个问题')
     expect(wrapper.findAll('.chat-message.user')).toHaveLength(0)
+  })
+
+  it('reuses the request id when an ambiguous send failure is retried', async () => {
+    const messagePayloads: Array<{ question: string; request_id: string }> = []
+    let attempt = 0
+    apiPost.mockImplementation(async (url: string, payload?: { question: string; request_id: string }) => {
+      if (url === '/chat/sessions') return { data: { ...sessionSummary, id: 'session-retry' } }
+      if (url === '/chat/sessions/session-retry/messages' && payload) {
+        messagePayloads.push(payload)
+        attempt += 1
+        if (attempt === 1) throw new Error('连接在响应前断开')
+        return { data: { answer: '服务器只保存了一次', citations: [] } }
+      }
+      return { data: {} }
+    })
+    const wrapper = mountChat('member')
+    await flushPromises()
+    await wrapper.get('.chat-new-session').trigger('click')
+    const input = wrapper.get('textarea[aria-label="提问内容"]')
+    await input.setValue('请幂等重试')
+    await wrapper.get('.chat-composer').trigger('submit')
+    await vi.waitFor(() => expect(wrapper.get('.error-banner').text()).toContain('连接在响应前断开'))
+
+    await wrapper.get('.chat-composer').trigger('submit')
+    await vi.waitFor(() => expect(wrapper.get('.chat-thread').text()).toContain('服务器只保存了一次'))
+
+    expect(messagePayloads).toHaveLength(2)
+    expect(messagePayloads[0]?.request_id).toBeTruthy()
+    expect(messagePayloads[1]?.request_id).toBe(messagePayloads[0]?.request_id)
+  })
+
+  it('prevents session navigation while a reply is in flight', async () => {
+    const secondSession = {
+      ...sessionSummary,
+      id: 'session-2',
+      title: '第二个会话',
+    }
+    apiGet.mockImplementation(async (url: string) => {
+      if (url === '/chat/sessions') return { data: [sessionSummary, secondSession] }
+      if (url === '/chat/sessions/session-2') {
+        return { data: { ...secondSession, messages: [] } }
+      }
+      return { data: responseFor(url) }
+    })
+    let resolveReply: ((value: { data: { answer: string; citations: never[] } }) => void) | undefined
+    apiPost.mockImplementation(async (url: string) => {
+      if (url === '/chat/sessions/session-1/messages') {
+        return new Promise((resolve) => { resolveReply = resolve })
+      }
+      return { data: {} }
+    })
+
+    const wrapper = mountChat('member')
+    await flushPromises()
+    await flushPromises()
+    await wrapper.get('textarea[aria-label="提问内容"]').setValue('正在回答的问题')
+    await wrapper.get('.chat-composer').trigger('submit')
+    await vi.waitFor(() => expect(resolveReply).toBeTypeOf('function'))
+
+    expect(wrapper.get('.chat-new-session').attributes('disabled')).toBeDefined()
+    const sessionButtons = wrapper.findAll<HTMLButtonElement>('.chat-session-select')
+    expect(sessionButtons).toHaveLength(2)
+    expect(sessionButtons.every((button) => button.attributes('disabled') !== undefined)).toBe(true)
+    expect(wrapper.findAll('.chat-session-delete').every((button) => button.attributes('disabled') !== undefined)).toBe(true)
+
+    await sessionButtons[1]?.trigger('click')
+    expect(wrapper.get('.chat-conversation-title strong').text()).toBe('登录故障排查')
+    resolveReply?.({ data: { answer: '属于第一个会话的回答', citations: [] } })
+    await flushPromises()
+    expect(wrapper.get('.chat-thread').text()).toContain('属于第一个会话的回答')
   })
 
   it('presents model configuration as a structured scrollable dialog', async () => {

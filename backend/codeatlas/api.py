@@ -15,6 +15,8 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func
+from sqlalchemy.engine import Connection
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
 from .auth import (
@@ -26,6 +28,11 @@ from .auth import (
     resolve_identity,
 )
 from .chat import ChatService, ChatUnavailableError
+from .chat_session_lock import (
+    ChatSessionLockError,
+    acquire_chat_session_lock,
+    release_chat_session_lock,
+)
 from .connectors import credential_environment_name, validate_public_https_base_url
 from .credential_crypto import CredentialEncryptionError, encrypt_secret
 from .documents import chunk_document, extract_structured_blocks
@@ -62,6 +69,7 @@ from .llm_config import (
     sync_models,
 )
 from .llm_provider_lock import LlmProviderLockError, llm_provider_lock
+from .member_lifecycle_lock import MemberLifecycleLockError, member_lifecycle_lock
 from .models import (
     ApiToken,
     AuditEvent,
@@ -353,10 +361,12 @@ class ChatRequest(BaseModel):
 class ChatSessionCreate(BaseModel):
     title: str = Field(default="新对话", max_length=200)
     repository_ids: list[str] = Field(default_factory=list, max_length=20)
+    request_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class ChatMessageCreate(BaseModel):
     question: str = Field(min_length=1, max_length=1000)
+    request_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class UserMemoryCreate(BaseModel):
@@ -639,7 +649,11 @@ def login(payload: LoginRequest, request: Request, response: Response):
     ip_identifier = digest_secret(f"ip:{client_ip}")
     check_login_rate_limits(account_identifier, ip_identifier)
     with database(request) as session:
-        user = session.exec(select(User).where(User.email == payload.email.strip().lower())).first()
+        user = session.exec(
+            select(User)
+            .where(User.email == payload.email.strip().lower())
+            .with_for_update()
+        ).first()
         with login_verification_slot(ip_identifier):
             password_valid = verify_password(
                 payload.password,
@@ -650,8 +664,10 @@ def login(payload: LoginRequest, request: Request, response: Response):
         identity = create_browser_session(session, user, response, request.app.state.settings)
         clear_login_rate_limit(account_identifier)
         audit(session, "auth.login", "user", user.id, user.id)
+        csrf_token = identity.session.csrf_token
+        user_payload = public_user(user)
         session.commit()
-        return {"user": public_user(user), "csrf_token": identity.session.csrf_token}
+        return {"user": user_payload, "csrf_token": csrf_token}
 
 
 @router.get("/auth/me")
@@ -2180,6 +2196,70 @@ def _serialize_user_memory(memory: UserMemory) -> dict:
     }
 
 
+@contextmanager
+def locked_chat_session_request(
+    request: Request,
+    session_id: str,
+) -> Iterator[Connection]:
+    """Authorize, lock one chat session, then release the account row lock."""
+    with request.app.state.engine.connect() as connection:
+        lock_name = ""
+        try:
+            with Session(connection) as auth_session:
+                identity = require_identity(request, auth_session, lock_user=False)
+                require_csrf(request, identity)
+                lock_name = acquire_chat_session_lock(connection, session_id)
+                auth_session.rollback()
+                connection.commit()
+            with Session(connection) as verification_session:
+                identity = require_identity(
+                    request, verification_session, lock_user=False
+                )
+                require_csrf(request, identity)
+            yield connection
+        finally:
+            if lock_name:
+                release_chat_session_lock(connection, lock_name)
+                connection.commit()
+
+
+@contextmanager
+def locked_member_lifecycle_request(request: Request) -> Iterator[Connection]:
+    with database(request) as session:
+        identity = require_admin(request, session, lock_user=False)
+        require_csrf(request, identity)
+    try:
+        with member_lifecycle_lock(request.app.state.engine) as connection:
+            yield connection
+    except MemberLifecycleLockError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+
+@contextmanager
+def locked_user_chat_sessions(
+    session: Session,
+    connection: Connection,
+    user_id: str,
+) -> Iterator[None]:
+    session_ids = session.exec(
+        select(ChatSession.id)
+        .where(ChatSession.user_id == user_id)
+        .order_by(ChatSession.id)
+    ).all()
+    lock_names: list[str] = []
+    try:
+        try:
+            for session_id in session_ids:
+                lock_names.append(acquire_chat_session_lock(connection, session_id))
+        except ChatSessionLockError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+        session.commit()
+        yield
+    finally:
+        for lock_name in reversed(lock_names):
+            release_chat_session_lock(connection, lock_name)
+
+
 @router.get("/memories")
 def list_user_memories(request: Request):
     with database(request) as session:
@@ -2233,7 +2313,22 @@ def create_user_memory(payload: UserMemoryCreate, request: Request):
             memory.id,
             identity.user.id,
         )
-        session.commit()
+        try:
+            session.commit()
+        except IntegrityError as exc:
+            session.rollback()
+            duplicate = session.exec(
+                select(UserMemory).where(
+                    UserMemory.user_id == identity.user.id,
+                    UserMemory.kind == kind,
+                    UserMemory.content_hash == content_hash,
+                )
+            ).first()
+            if duplicate:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT, "Memory already exists"
+                ) from exc
+            raise
         session.refresh(memory)
         return _serialize_user_memory(memory)
 
@@ -2267,13 +2362,55 @@ def create_chat_session(payload: ChatSessionCreate, request: Request):
     with database(request) as session:
         identity = require_identity(request, session)
         require_csrf(request, identity)
+        normalized_title = payload.title.strip()[:200] or "新对话"
+        repository_ids_json = json.dumps(payload.repository_ids)
+        if payload.request_id:
+            existing = session.exec(
+                select(ChatSession).where(
+                    ChatSession.user_id == identity.user.id,
+                    ChatSession.request_id == payload.request_id,
+                )
+            ).first()
+            if existing:
+                if (
+                    existing.title != normalized_title
+                    or existing.repository_ids_json != repository_ids_json
+                ):
+                    raise HTTPException(
+                        status.HTTP_409_CONFLICT,
+                        "request_id was already used for another chat session",
+                    )
+                return _serialize_chat_session(existing)
         conversation = ChatSession(
             user_id=identity.user.id,
-            title=payload.title.strip()[:200] or "新对话",
-            repository_ids_json=json.dumps(payload.repository_ids),
+            request_id=payload.request_id,
+            title=normalized_title,
+            repository_ids_json=repository_ids_json,
         )
         session.add(conversation)
-        session.commit()
+        try:
+            session.commit()
+        except IntegrityError as exc:
+            session.rollback()
+            if not payload.request_id:
+                raise
+            existing = session.exec(
+                select(ChatSession).where(
+                    ChatSession.user_id == identity.user.id,
+                    ChatSession.request_id == payload.request_id,
+                )
+            ).first()
+            if existing and (
+                existing.title == normalized_title
+                and existing.repository_ids_json == repository_ids_json
+            ):
+                return _serialize_chat_session(existing)
+            if existing:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    "request_id was already used for another chat session",
+                ) from exc
+            raise
         session.refresh(conversation)
         return _serialize_chat_session(conversation)
 
@@ -2310,21 +2447,27 @@ def get_chat_session(session_id: str, request: Request):
 
 @router.delete("/chat/sessions/{session_id}", status_code=204)
 def delete_chat_session(session_id: str, request: Request):
-    with database(request) as session:
-        identity = require_identity(request, session)
-        require_csrf(request, identity)
-        conversation = _owned_chat_session(session, session_id, identity.user.id)
-        messages = session.exec(
-            select(ChatMessage).where(
-                ChatMessage.session_id == conversation.id,
-                ChatMessage.user_id == identity.user.id,
-            )
-        ).all()
-        for message in messages:
-            session.delete(message)
-        session.flush()
-        session.delete(conversation)
-        session.commit()
+    try:
+        with locked_chat_session_request(request, session_id) as connection:
+            with Session(connection) as session:
+                identity = require_identity(request, session, lock_user=False)
+                require_csrf(request, identity)
+                conversation = _owned_chat_session(
+                    session, session_id, identity.user.id
+                )
+                messages = session.exec(
+                    select(ChatMessage).where(
+                        ChatMessage.session_id == conversation.id,
+                        ChatMessage.user_id == identity.user.id,
+                    )
+                ).all()
+                for message in messages:
+                    session.delete(message)
+                session.flush()
+                session.delete(conversation)
+                session.commit()
+    except ChatSessionLockError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
 
 
 @router.post("/chat/sessions/{session_id}/messages")
@@ -2333,69 +2476,119 @@ def create_chat_message(
 ):
     client_ip = request.client.host if request.client else "unknown"
     with database(request) as session:
-        identity = require_identity(request, session)
+        identity = require_identity(request, session, lock_user=False)
         require_csrf(request, identity)
         limiter.check(f"chat:{identity.user.id or client_ip}", 20)
-        conversation = _owned_chat_session(session, session_id, identity.user.id)
-        stored_messages = session.exec(
-            select(ChatMessage)
-            .where(
-                ChatMessage.session_id == conversation.id,
-                ChatMessage.user_id == identity.user.id,
-            )
-            .order_by(col(ChatMessage.sequence).desc())
-            .limit(6)
-        ).all()
-        history = [
-            {"role": item.role, "content": item.content}
-            for item in reversed(stored_messages)
-        ]
-        memories = session.exec(
-            select(UserMemory)
-            .where(UserMemory.user_id == identity.user.id)
-            .order_by(col(UserMemory.updated_at).desc())
-            .limit(20)
-        ).all()
-        provider = session.exec(select(LlmProvider).where(LlmProvider.is_active)).first()
-        provider_config = None
-        if provider:
-            provider_config = type(
-                "Provider",
-                (),
-                {
-                    "base_url": provider.base_url,
-                    "api_key": decrypt_api_key(
-                        request.app.state.settings.data_dir, provider
-                    ),
-                    "model": provider.model,
-                },
-            )()
-        service = ChatService(
-            request.app.state.settings,
-            request.app.state.retriever,
-            provider_config,
-        )
-        try:
-            result = service.ask(
-                payload.question,
-                identity.user,
-                json.loads(conversation.repository_ids_json or "[]") or None,
-                history,
-                [item.content for item in memories],
-            )
-        except ChatUnavailableError as exc:
-            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
-        _store_chat_exchange(
-            session,
-            conversation.id,
-            identity.user.id,
-            payload.question,
-            result,
-        )
-        session.commit()
-        return result
+    try:
+        with locked_chat_session_request(request, session_id) as connection:
+            with Session(connection) as session:
+                identity = require_identity(request, session, lock_user=False)
+                require_csrf(request, identity)
+                conversation = _owned_chat_session(
+                    session, session_id, identity.user.id
+                )
+                normalized_question = payload.question.strip()
+                if payload.request_id:
+                    existing_user_message = session.exec(
+                        select(ChatMessage).where(
+                            ChatMessage.session_id == conversation.id,
+                            ChatMessage.user_id == identity.user.id,
+                            ChatMessage.request_id == payload.request_id,
+                        )
+                    ).first()
+                    if existing_user_message:
+                        if existing_user_message.content != normalized_question:
+                            raise HTTPException(
+                                status.HTTP_409_CONFLICT,
+                                "request_id was already used for another question",
+                            )
+                        existing_answer = session.exec(
+                            select(ChatMessage).where(
+                                ChatMessage.session_id == conversation.id,
+                                ChatMessage.user_id == identity.user.id,
+                                ChatMessage.sequence == existing_user_message.sequence + 1,
+                                ChatMessage.role == "assistant",
+                            )
+                        ).first()
+                        if not existing_answer:
+                            raise HTTPException(
+                                status.HTTP_409_CONFLICT,
+                                "Chat request is still being finalized",
+                            )
+                        return {
+                            "answer": existing_answer.content,
+                            "citations": json.loads(
+                                existing_answer.citations_json or "[]"
+                            ),
+                        }
+                stored_messages = session.exec(
+                    select(ChatMessage)
+                    .where(
+                        ChatMessage.session_id == conversation.id,
+                        ChatMessage.user_id == identity.user.id,
+                    )
+                    .order_by(col(ChatMessage.sequence).desc())
+                    .limit(6)
+                ).all()
+                history = [
+                    {"role": item.role, "content": item.content}
+                    for item in reversed(stored_messages)
+                ]
+                memories = session.exec(
+                    select(UserMemory)
+                    .where(UserMemory.user_id == identity.user.id)
+                    .order_by(col(UserMemory.updated_at).desc())
+                    .limit(20)
+                ).all()
+                provider = session.exec(
+                    select(LlmProvider).where(LlmProvider.is_active)
+                ).first()
+                provider_config = None
+                if provider:
+                    provider_config = type(
+                        "Provider",
+                        (),
+                        {
+                            "base_url": provider.base_url,
+                            "api_key": decrypt_api_key(
+                                request.app.state.settings.data_dir, provider
+                            ),
+                            "model": provider.model,
+                        },
+                    )()
+                service = ChatService(
+                    request.app.state.settings,
+                    request.app.state.retriever,
+                    provider_config,
+                )
+                try:
+                    result = service.ask(
+                        payload.question,
+                        identity.user,
+                        json.loads(conversation.repository_ids_json or "[]") or None,
+                        history,
+                        [item.content for item in memories],
+                    )
+                except ChatUnavailableError as exc:
+                    raise HTTPException(
+                        status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)
+                    ) from exc
+                except ValueError as exc:
+                    raise HTTPException(
+                        status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)
+                    ) from exc
+                _store_chat_exchange(
+                    session,
+                    conversation.id,
+                    identity.user.id,
+                    payload.question,
+                    result,
+                    payload.request_id,
+                )
+                session.commit()
+                return result
+    except ChatSessionLockError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
 
 
 def _store_chat_exchange(
@@ -2404,6 +2597,7 @@ def _store_chat_exchange(
     user_id: str,
     question: str,
     result: dict,
+    request_id: str | None = None,
 ) -> None:
     conversation = session.exec(
         select(ChatSession)
@@ -2425,6 +2619,7 @@ def _store_chat_exchange(
                 user_id=user_id,
                 role="user",
                 sequence=user_sequence,
+                request_id=request_id,
                 content=question.strip(),
             ),
             ChatMessage(
@@ -2563,96 +2758,152 @@ def list_members(request: Request):
 
 @router.patch("/members/{user_id}")
 def update_member(user_id: str, payload: MemberUpdate, request: Request):
-    with database(request) as session:
-        identity = require_admin(request, session)
-        require_csrf(request, identity)
-        user = session.get(User, user_id)
-        if not user:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Member not found")
-        if payload.role is not None:
-            if payload.role not in {"admin", "member"}:
-                raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Invalid role")
-            user.role = payload.role
-        if payload.is_active is not None:
-            user.is_active = payload.is_active
-            if not payload.is_active:
-                browser_sessions = session.exec(
-                    select(UserSession).where(UserSession.user_id == user.id)
-                ).all()
-                for browser_session in browser_sessions:
-                    session.delete(browser_session)
-        session.add(user)
-        audit(session, "member.update", "user", user.id, identity.user.id)
-        session.commit()
-        return public_user(user)
+    with locked_member_lifecycle_request(request) as connection:
+        with Session(connection) as session:
+            actor = require_admin(request, session, lock_user=False)
+            require_csrf(request, actor)
+            locked_users = session.exec(
+                select(User)
+                .where(col(User.id).in_(sorted({actor.user.id, user_id})))
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            ).all()
+            users_by_id = {item.id: item for item in locked_users}
+            identity_user = users_by_id.get(actor.user.id)
+            user = users_by_id.get(user_id)
+            if not identity_user or not identity_user.is_active:
+                raise HTTPException(
+                    status.HTTP_401_UNAUTHORIZED, "Authentication required"
+                )
+            if not user:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Member not found")
+            if payload.role is not None:
+                if payload.role not in {"admin", "member"}:
+                    raise HTTPException(
+                        status.HTTP_422_UNPROCESSABLE_CONTENT, "Invalid role"
+                    )
+                user.role = payload.role
+            if payload.is_active is not None:
+                user.is_active = payload.is_active
+                if not payload.is_active:
+                    browser_sessions = session.exec(
+                        select(UserSession)
+                        .where(UserSession.user_id == user.id)
+                        .with_for_update()
+                    ).all()
+                    for browser_session in browser_sessions:
+                        session.delete(browser_session)
+            session.add(user)
+            audit(session, "member.update", "user", user.id, identity_user.id)
+            session.commit()
+            result = public_user(user)
+            if payload.is_active is False:
+                with locked_user_chat_sessions(session, connection, user.id):
+                    pass
+            return result
 
 
 @router.delete("/members/{user_id}", status_code=204)
 def delete_member(user_id: str, request: Request):
-    with database(request) as session:
-        identity = require_admin(request, session)
-        require_csrf(request, identity)
-        user = session.get(User, user_id)
-        if not user:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Member not found")
-        if user.id == identity.user.id:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Cannot delete yourself")
-
-        for model in (
-            GitLabSource,
-            GitHubSource,
-            DocumentCollection,
-            Document,
-            ExternalSource,
-            WikiPage,
-            EmbeddingProfile,
-            LlmProvider,
-            Repository,
-            IndexJob,
-        ):
-            for item in session.exec(
-                select(model).where(model.created_by == user.id)
-            ).all():
-                item.created_by = identity.user.id
-                session.add(item)
-
-        conversations = session.exec(
-            select(ChatSession).where(ChatSession.user_id == user.id)
-        ).all()
-        conversation_ids = [conversation.id for conversation in conversations]
-        if conversation_ids:
-            messages = session.exec(
-                select(ChatMessage).where(
-                    col(ChatMessage.session_id).in_(conversation_ids)
-                )
+    with locked_member_lifecycle_request(request) as connection:
+        with Session(connection) as session:
+            actor = require_admin(request, session, lock_user=False)
+            require_csrf(request, actor)
+            locked_users = session.exec(
+                select(User)
+                .where(col(User.id).in_(sorted({actor.user.id, user_id})))
+                .with_for_update()
+                .execution_options(populate_existing=True)
             ).all()
-            for message in messages:
-                session.delete(message)
+            users_by_id = {item.id: item for item in locked_users}
+            identity_user = users_by_id.get(actor.user.id)
+            user = users_by_id.get(user_id)
+            if not identity_user or not identity_user.is_active:
+                raise HTTPException(
+                    status.HTTP_401_UNAUTHORIZED, "Authentication required"
+                )
+            if not user:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Member not found")
+            if user.id == identity_user.id:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "Cannot delete yourself")
+            actor_id = identity_user.id
+            user.is_active = False
+            session.add(user)
+            for browser_session in session.exec(
+                select(UserSession)
+                        .where(UserSession.user_id == user.id)
+                        .with_for_update()
+            ).all():
+                session.delete(browser_session)
+            session.commit()
+
+        with Session(connection) as session:
+          with locked_user_chat_sessions(session, connection, user_id):
+            identity_user = session.get(User, actor_id)
+            user = session.get(User, user_id)
+            if not identity_user or not identity_user.is_active:
+                raise HTTPException(
+                    status.HTTP_401_UNAUTHORIZED, "Authentication required"
+                )
+            if not user:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Member not found")
+            for model in (
+                GitLabSource,
+                GitHubSource,
+                DocumentCollection,
+                Document,
+                ExternalSource,
+                WikiPage,
+                EmbeddingProfile,
+                LlmProvider,
+                Repository,
+                IndexJob,
+            ):
+                for item in session.exec(
+                    select(model).where(model.created_by == user.id)
+                ).all():
+                    item.created_by = identity_user.id
+                    session.add(item)
+
+            conversations = session.exec(
+                select(ChatSession).where(ChatSession.user_id == user.id)
+            ).all()
+            conversation_ids = [conversation.id for conversation in conversations]
+            if conversation_ids:
+                messages = session.exec(
+                    select(ChatMessage).where(
+                        col(ChatMessage.session_id).in_(conversation_ids)
+                    )
+                ).all()
+                for message in messages:
+                    session.delete(message)
+                session.flush()
+            for conversation in conversations:
+                session.delete(conversation)
+
+            for memory in session.exec(
+                select(UserMemory).where(UserMemory.user_id == user.id)
+            ).all():
+                session.delete(memory)
+            for browser_session in session.exec(
+                select(UserSession)
+                        .where(UserSession.user_id == user.id)
+                        .with_for_update()
+            ).all():
+                session.delete(browser_session)
+            for access in session.exec(
+                select(RepositoryAccess).where(RepositoryAccess.user_id == user.id)
+            ).all():
+                session.delete(access)
+            for token in session.exec(
+                select(ApiToken).where(ApiToken.created_by == user.id)
+            ).all():
+                session.delete(token)
+
+            audit(session, "member.delete", "user", user.id, actor_id)
             session.flush()
-        for conversation in conversations:
-            session.delete(conversation)
-
-        for memory in session.exec(
-            select(UserMemory).where(UserMemory.user_id == user.id)
-        ).all():
-            session.delete(memory)
-        for browser_session in session.exec(
-            select(UserSession).where(UserSession.user_id == user.id)
-        ).all():
-            session.delete(browser_session)
-        for access in session.exec(
-            select(RepositoryAccess).where(RepositoryAccess.user_id == user.id)
-        ).all():
-            session.delete(access)
-        for token in session.exec(
-            select(ApiToken).where(ApiToken.created_by == user.id)
-        ).all():
-            session.delete(token)
-
-        audit(session, "member.delete", "user", user.id, identity.user.id)
-        session.flush()
-        session.delete(user)
-        session.commit()
+            session.delete(user)
+            session.commit()
 
 
 @router.post("/members", status_code=201)
@@ -2679,10 +2930,14 @@ def create_member(payload: MemberCreate, request: Request):
 
 @router.put("/members/{user_id}/repositories/{repository_id}", status_code=204)
 def grant_repository(user_id: str, repository_id: str, request: Request):
-    with database(request) as session:
-        identity = require_admin(request, session)
+    with locked_member_lifecycle_request(request) as connection:
+      with Session(connection) as session:
+        identity = require_admin(request, session, lock_user=False)
         require_csrf(request, identity)
-        if not session.get(User, user_id) or not session.get(Repository, repository_id):
+        user = session.exec(
+            select(User).where(User.id == user_id).with_for_update()
+        ).first()
+        if not user or not session.get(Repository, repository_id):
             raise HTTPException(status.HTTP_404_NOT_FOUND, "User or repository not found")
         existing = session.exec(select(RepositoryAccess).where(
             RepositoryAccess.user_id == user_id,
@@ -2696,9 +2951,15 @@ def grant_repository(user_id: str, repository_id: str, request: Request):
 
 @router.delete("/members/{user_id}/repositories/{repository_id}", status_code=204)
 def revoke_repository(user_id: str, repository_id: str, request: Request):
-    with database(request) as session:
-        identity = require_admin(request, session)
+    with locked_member_lifecycle_request(request) as connection:
+      with Session(connection) as session:
+        identity = require_admin(request, session, lock_user=False)
         require_csrf(request, identity)
+        user = session.exec(
+            select(User).where(User.id == user_id).with_for_update()
+        ).first()
+        if not user:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
         access = session.exec(select(RepositoryAccess).where(
             RepositoryAccess.user_id == user_id,
             RepositoryAccess.repository_id == repository_id,

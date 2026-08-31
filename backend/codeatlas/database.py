@@ -28,7 +28,8 @@ def create_database(settings: Settings) -> Engine:
 
 
 def initialize_database(settings: Settings, engine) -> None:
-    SQLModel.metadata.create_all(engine)
+    if settings.environment == "test":
+        SQLModel.metadata.create_all(engine)
     with Session(engine) as session:
         jobs = session.exec(select(IndexJob).where(IndexJob.status == "running")).all()
         for job in jobs:

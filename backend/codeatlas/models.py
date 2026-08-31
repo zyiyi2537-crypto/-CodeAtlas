@@ -35,8 +35,13 @@ class UserSession(SQLModel, table=True):
 
 
 class ChatSession(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("user_id", "request_id", name="uq_chat_session_request"),
+    )
+
     id: str = Field(default_factory=new_id, primary_key=True, max_length=32)
     user_id: str = Field(foreign_key="user.id", index=True, max_length=32)
+    request_id: str | None = Field(default=None, max_length=64)
     title: str = Field(default="新对话", max_length=200)
     repository_ids_json: str = Field(default="[]", sa_column=Column(Text, nullable=False))
     message_count: int = Field(default=0)
@@ -47,6 +52,7 @@ class ChatSession(SQLModel, table=True):
 class ChatMessage(SQLModel, table=True):
     __table_args__ = (
         UniqueConstraint("session_id", "sequence", name="uq_chat_message_sequence"),
+        UniqueConstraint("session_id", "request_id", name="uq_chat_message_request"),
     )
 
     id: str = Field(default_factory=new_id, primary_key=True, max_length=32)
@@ -54,6 +60,7 @@ class ChatMessage(SQLModel, table=True):
     user_id: str = Field(foreign_key="user.id", index=True, max_length=32)
     role: str = Field(max_length=20)
     sequence: int
+    request_id: str | None = Field(default=None, max_length=64)
     content: str = Field(sa_column=Column(Text, nullable=False))
     citations_json: str = Field(default="[]", sa_column=Column(Text, nullable=False))
     created_at: datetime = Field(default_factory=utc_now, index=True)

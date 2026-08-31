@@ -34,6 +34,7 @@ def test_chat_memory_migration_upgrades_and_downgrades_on_mysql(
         assert {column["name"] for column in inspector.get_columns("chatsession")} == {
             "id",
             "user_id",
+            "request_id",
             "title",
             "repository_ids_json",
             "message_count",
@@ -46,6 +47,7 @@ def test_chat_memory_migration_upgrades_and_downgrades_on_mysql(
             "user_id",
             "role",
             "sequence",
+            "request_id",
             "content",
             "citations_json",
             "created_at",
@@ -63,14 +65,48 @@ def test_chat_memory_migration_upgrades_and_downgrades_on_mysql(
             tuple(item["column_names"])
             for item in inspector.get_unique_constraints("chatmessage")
         }
+        session_uniques = {
+            tuple(item["column_names"])
+            for item in inspector.get_unique_constraints("chatsession")
+        }
         memory_uniques = {
             tuple(item["column_names"])
             for item in inspector.get_unique_constraints("usermemory")
         }
         assert ("session_id", "sequence") in chat_uniques
+        assert ("session_id", "request_id") in chat_uniques
+        assert ("user_id", "request_id") in session_uniques
         assert ("user_id", "kind", "content_hash") in memory_uniques
         for table in ("chatsession", "chatmessage", "usermemory"):
             assert inspector.get_foreign_keys(table)
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, "20260830_14")
+    engine = create_engine(mysql_database_url)
+    try:
+        inspector = inspect(engine)
+        assert "request_id" not in {
+            column["name"] for column in inspector.get_columns("chatmessage")
+        }
+        assert "request_id" not in {
+            column["name"] for column in inspector.get_columns("chatsession")
+        }
+        assert {"chatsession", "chatmessage", "usermemory"} <= set(
+            inspector.get_table_names()
+        )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_engine(mysql_database_url)
+    try:
+        assert "request_id" in {
+            column["name"] for column in inspect(engine).get_columns("chatmessage")
+        }
+        assert "request_id" in {
+            column["name"] for column in inspect(engine).get_columns("chatsession")
+        }
     finally:
         engine.dispose()
 
