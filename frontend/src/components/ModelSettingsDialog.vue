@@ -30,6 +30,7 @@ const editingKeyConfigured = ref(false)
 const modelError = ref('')
 const syncedModels = ref<LlmModel[]>([])
 const providerForm = reactive(createLlmProviderForm())
+const dialog = ref<HTMLElement | null>(null)
 const closeButton = ref<HTMLButtonElement | null>(null)
 const previousBodyOverflow = document.body.style.overflow
 const globalChrome: Array<{
@@ -43,12 +44,32 @@ function closeDialog() {
 }
 
 function handleKeydown(event: KeyboardEvent) {
-  if (event.key === 'Escape') closeDialog()
+  if (event.key === 'Escape') {
+    closeDialog()
+    return
+  }
+  if (event.key !== 'Tab' || !dialog.value) return
+  const focusable = Array.from(
+    dialog.value.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  )
+  if (!focusable.length) return
+  const first = focusable[0]
+  const last = focusable.at(-1)
+  if (!first || !last) return
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first.focus()
+  }
 }
 
 onMounted(async () => {
   document.body.style.overflow = 'hidden'
-  document.querySelectorAll<HTMLElement>('.topbar, .sidebar').forEach((element) => {
+  document.querySelectorAll<HTMLElement>('.topbar, .sidebar, .menu-scrim').forEach((element) => {
     globalChrome.push({
       element,
       inert: Boolean(element.inert),
@@ -169,7 +190,7 @@ function removeProvider(provider: LlmProvider) {
 
 <template>
   <div class="preview-backdrop model-settings-backdrop" role="presentation" @click.self="closeDialog">
-    <section class="model-settings-dialog" role="dialog" aria-modal="true" aria-label="模型配置">
+    <section ref="dialog" class="model-settings-dialog" role="dialog" aria-modal="true" aria-label="模型配置">
       <header class="model-settings-header">
         <div class="model-settings-title">
           <span class="model-settings-icon"><ServerCog :size="19" /></span>

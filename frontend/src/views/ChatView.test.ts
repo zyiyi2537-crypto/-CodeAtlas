@@ -236,7 +236,9 @@ describe('ChatView account workspace', () => {
     topbar.className = 'topbar'
     const sidebar = document.createElement('aside')
     sidebar.className = 'sidebar'
-    document.body.append(topbar, sidebar)
+    const menuScrim = document.createElement('button')
+    menuScrim.className = 'menu-scrim'
+    document.body.append(topbar, sidebar, menuScrim)
     const wrapper = mountChat('admin')
     document.body.appendChild(wrapper.element)
     await flushPromises()
@@ -255,7 +257,18 @@ describe('ChatView account workspace', () => {
     expect(document.body.style.overflow).toBe('hidden')
     expect(topbar.inert).toBe(true)
     expect(sidebar.inert).toBe(true)
-    expect(document.activeElement).toBe(dialog.get('button[aria-label="关闭模型配置"]').element)
+    expect(menuScrim.inert).toBe(true)
+    const closeButton = dialog.get('button[aria-label="关闭模型配置"]').element as HTMLButtonElement
+    expect(document.activeElement).toBe(closeButton)
+
+    const dialogButtons = dialog.findAll<HTMLButtonElement>('button:not([disabled])')
+    const lastButton = dialogButtons.at(-1)?.element
+    expect(lastButton).toBeTruthy()
+    lastButton?.focus()
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }))
+    expect(document.activeElement).toBe(closeButton)
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true }))
+    expect(document.activeElement).toBe(lastButton)
 
     await wrapper.get('.model-provider-card button[aria-label="编辑 gpt"]').trigger('click')
     expect(dialog.get('.model-form-actions .command-button').text()).toContain('保存修改')
@@ -266,6 +279,7 @@ describe('ChatView account workspace', () => {
     expect(document.body.style.overflow).toBe('')
     expect(topbar.inert).toBe(false)
     expect(sidebar.inert).toBe(false)
+    expect(menuScrim.inert).toBe(false)
     expect(document.activeElement).toBe(wrapper.get('button[data-testid="open-model-settings"]').element)
     wrapper.unmount()
     document.body.innerHTML = ''
