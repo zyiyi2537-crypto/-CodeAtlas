@@ -598,6 +598,11 @@ textarea:focus {
   font-size: 12px;
 }
 
+.section-heading > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .section-heading > a {
   color: var(--blue);
 }
@@ -1068,6 +1073,7 @@ textarea:focus {
 .secret-dialog {
   width: min(860px, 100%);
   max-height: min(780px, calc(100vh - 48px));
+  max-height: min(780px, calc(100dvh - 48px));
   overflow: hidden;
   background: var(--surface);
   border: 1px solid var(--border-strong);
@@ -1135,10 +1141,16 @@ textarea:focus {
 }
 
 .form-dialog {
+  display: flex;
+  flex-direction: column;
   padding-bottom: 20px;
 }
 
 .form-dialog .stack-form {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 20px;
 }
 
@@ -2700,6 +2712,35 @@ fieldset small {
     font-size: 24px;
   }
 
+  .section-heading {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .section-heading > span {
+    min-width: 0;
+    order: 3;
+    flex: 1 1 220px;
+    flex-basis: 100%;
+  }
+
+  .section-heading > h2 {
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+
+  .section-heading > div {
+    min-width: 0;
+    flex: 1 1 calc(100% - 56px);
+    display: grid;
+    align-items: start;
+  }
+
+  .section-heading > div > span {
+    overflow-wrap: anywhere;
+  }
+
+
   .index-summary {
     display: none;
   }
@@ -2939,12 +2980,14 @@ fieldset small {
 }
 
 .source-card-grid { display: grid; gap: 10px; padding: 16px; }
-.source-card { display: flex; width: 100%; gap: 12px; align-items: center; padding: 14px; color: var(--text); text-align: left; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; cursor: pointer; }
+.source-card { display: flex; width: 100%; flex-wrap: wrap; gap: 12px; align-items: center; padding: 14px; color: var(--text); text-align: left; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; cursor: pointer; }
 .source-card:hover, .source-card.selected { border-color: var(--border-strong); background: var(--surface-soft); }
 .source-card-icon { display: grid; width: 36px; height: 36px; place-items: center; color: var(--pine-strong); background: var(--pine-soft); border-radius: 4px; }
 .source-card-main, .source-card-meta { display: flex; flex-direction: column; gap: 3px; }
 .source-card-main { min-width: 0; flex: 1; }
 .source-card-main small, .source-card-meta small, .gitlab-project-row small { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.source-card .error-text { min-width: 0; max-width: 100%; align-self: stretch; white-space: normal; overflow-wrap: anywhere; }
+.source-card > .error-text { flex-basis: 100%; }
 .source-card-meta { align-items: flex-end; }
 .status-ready { color: var(--green); font-size: 12px; }
 .status-muted { color: var(--muted); font-size: 12px; }
@@ -2953,6 +2996,51 @@ fieldset small {
 .gitlab-project-row:hover { background: var(--surface-soft); }
 .gitlab-project-row > span:nth-child(2) { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
 .form-hint { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+
+@media (max-width: 760px) {
+  .source-card {
+    display: grid;
+    grid-template-columns: 36px minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .source-card-icon {
+    grid-row: 1 / span 2;
+  }
+
+  .source-card-main {
+    min-width: 0;
+  }
+
+  .source-card-meta {
+    grid-column: 2;
+    min-width: 0;
+    align-items: flex-start;
+  }
+
+  .source-card > .heading-actions {
+    grid-column: 1 / -1;
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .source-card > .heading-actions > button {
+    width: auto;
+  }
+
+  .source-card > .error-text {
+    grid-column: 1 / -1;
+  }
+
+  .gitlab-project-row {
+    grid-template-columns: 24px minmax(0, 1fr);
+  }
+
+  .gitlab-project-row > :nth-child(n + 3) {
+    grid-column: 2;
+    justify-self: start;
+  }
+}
 
 /* ---------- Account chat workspace ---------- */
 

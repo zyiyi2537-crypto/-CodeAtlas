@@ -5,6 +5,9 @@ import { defineConfig } from 'vite'
 
 export default defineConfig({
   base: process.env.VITE_BASE_PATH || '/lab/code-kb/',
+  build: {
+    assetsInlineLimit: 0,
+  },
   plugins: [vue()],
   resolve: {
     alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
