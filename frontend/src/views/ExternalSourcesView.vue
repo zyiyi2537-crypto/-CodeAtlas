@@ -73,6 +73,10 @@ function requestDelete(id: string) {
     deleteSource.mutate(id)
   }
 }
+
+function closeCreateDialog() {
+  showCreate.value = false
+}
 </script>
 
 <template>
@@ -96,9 +100,9 @@ function requestDelete(id: string) {
       <EmptyState v-else title="尚未配置外部知识源" description="先建立文档集，然后添加对象存储或企业文档来源。" />
     </section>
 
-    <div v-if="showCreate" class="preview-backdrop" role="presentation" @click.self="showCreate = false">
-      <section class="form-dialog" role="dialog" aria-modal="true" aria-label="添加外部知识源">
-        <header class="dialog-header"><div><p class="eyebrow">NEW EXTERNAL SOURCE</p><h2>添加外部知识源</h2></div><button class="icon-button" type="button" aria-label="关闭" @click="showCreate = false"><X :size="18" /></button></header>
+    <div v-if="showCreate" class="preview-backdrop" role="presentation" @click.self="closeCreateDialog">
+      <section v-modal-dialog="closeCreateDialog" class="form-dialog" role="dialog" aria-modal="true" aria-label="添加外部知识源">
+        <header class="dialog-header"><div><p class="eyebrow">NEW EXTERNAL SOURCE</p><h2>添加外部知识源</h2></div><button class="icon-button" type="button" aria-label="关闭" @click="closeCreateDialog"><X :size="18" /></button></header>
         <div v-if="formError" class="error-banner">{{ formError }}</div>
         <form class="stack-form" @submit.prevent="createSource.mutate()">
           <div class="form-grid"><label><span>来源名称</span><input v-model="form.name" required /></label><label><span>连接器</span><select v-model="form.provider"><option v-for="provider in externalSourceProviders" :key="provider.value" :value="provider.value">{{ provider.label }}</option></select></label></div>
@@ -116,7 +120,7 @@ function requestDelete(id: string) {
           </template>
           <label><span>检查间隔（秒）</span><input v-model.number="form.poll_interval_seconds" type="number" min="300" max="86400" /></label>
           <p class="form-note">本页面不接收 Access Key、Secret Key 或 Token。保存后，在服务器安全环境中配置系统提示的 <code>CODEATLAS_CREDENTIAL_*</code> JSON 变量。Notion 使用 token；Confluence Cloud 使用 email + api_token；Data Center 使用 personal_access_token。</p>
-          <div class="form-actions"><button class="secondary-button" type="button" @click="showCreate = false">取消</button><button class="command-button" type="submit" :disabled="createSource.isPending.value">保存来源</button></div>
+          <div class="form-actions"><button class="secondary-button" type="button" @click="closeCreateDialog">取消</button><button class="command-button" type="submit" :disabled="createSource.isPending.value">保存来源</button></div>
         </form>
       </section>
     </div>

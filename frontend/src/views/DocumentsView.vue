@@ -53,6 +53,7 @@ const uploadDocument = useMutation({
 })
 
 function chooseFile() { fileInput.value?.click() }
+function closeCreateDialog() { showCreate.value = false }
 function onFileChange(event: Event) {
   const file = (event.target as HTMLInputElement).files?.[0]
   if (file && selectedCollection.value) uploadDocument.mutate(file)
@@ -87,6 +88,6 @@ function onFileChange(event: Event) {
       </div>
       <EmptyState v-else title="文档集为空" description="上传 Word、Excel、文本 PDF、PPT 或 Markdown 后，会按标题、表格、页、工作表和幻灯片结构建立语义索引。" />
     </section>
-    <div v-if="showCreate" class="preview-backdrop" role="presentation" @click.self="showCreate = false"><section class="form-dialog" role="dialog" aria-modal="true"><header class="dialog-header"><h2>新建文档集</h2><button class="icon-button" type="button" aria-label="关闭" @click="showCreate = false"><X :size="18" /></button></header><form class="stack-form" @submit.prevent="createCollection.mutate()"><label><span>名称</span><input v-model="collectionName" required /></label><label><span>描述</span><textarea v-model="collectionDescription" rows="3" /></label><div class="form-actions"><button class="secondary-button" type="button" @click="showCreate = false">取消</button><button class="command-button" type="submit">创建</button></div></form></section></div>
+    <div v-if="showCreate" class="preview-backdrop" role="presentation" @click.self="closeCreateDialog"><section v-modal-dialog="closeCreateDialog" class="form-dialog" role="dialog" aria-modal="true" aria-label="新建文档集"><header class="dialog-header"><h2>新建文档集</h2><button class="icon-button" type="button" aria-label="关闭" @click="closeCreateDialog"><X :size="18" /></button></header><form class="stack-form" @submit.prevent="createCollection.mutate()"><label><span>名称</span><input v-model="collectionName" required /></label><label><span>描述</span><textarea v-model="collectionDescription" rows="3" /></label><div class="form-actions"><button class="secondary-button" type="button" @click="closeCreateDialog">取消</button><button class="command-button" type="submit">创建</button></div></form></section></div>
   </div>
 </template>

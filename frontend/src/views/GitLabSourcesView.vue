@@ -75,6 +75,10 @@ const importProject = useMutation({
 function selectSource(source: GitLabSource) {
   selectedSource.value = source.id
 }
+
+function closeCreateDialog() {
+  showCreate.value = false
+}
 </script>
 
 <template>
@@ -149,38 +153,40 @@ function selectSource(source: GitLabSource) {
         {{ errorMessage(projects.error.value) }}
       </div>
       <div v-else-if="projects.data.value?.length" class="gitlab-project-list">
-        <a
+        <div
           v-for="project in projects.data.value"
           :key="project.external_id"
           class="gitlab-project-row"
-          :href="project.web_url"
-          target="_blank"
-          rel="noreferrer"
         >
           <FolderGit2 :size="18" />
-          <span>
+          <a
+            class="gitlab-project-link"
+            :href="project.web_url"
+            target="_blank"
+            rel="noreferrer"
+          >
             <strong>{{ project.path_with_namespace }}</strong>
             <small>{{ project.description || '暂无描述' }}</small>
-          </span>
+          </a>
           <span class="mono-cell">{{ project.default_branch }}</span>
           <button
-            class="secondary-button"
+            class="secondary-button gitlab-project-import"
             type="button"
             :disabled="importProject.isPending.value"
-            @click.prevent="importProject.mutate(project)"
+            @click="importProject.mutate(project)"
           >
             导入代码库
           </button>
-        </a>
+        </div>
       </div>
       <EmptyState v-else title="Group 中没有项目" />
     </section>
 
-    <div v-if="showCreate" class="preview-backdrop" role="presentation" @click.self="showCreate = false">
-      <section class="form-dialog" role="dialog" aria-modal="true" aria-label="添加 GitLab Group">
+    <div v-if="showCreate" class="preview-backdrop" role="presentation" @click.self="closeCreateDialog">
+      <section v-modal-dialog="closeCreateDialog" class="form-dialog" role="dialog" aria-modal="true" aria-label="添加 GitLab Group">
         <header class="dialog-header">
           <div><p class="eyebrow">NEW GITLAB SOURCE</p><h2>添加 GitLab Group</h2></div>
-          <button class="icon-button" type="button" aria-label="关闭" @click="showCreate = false"><X :size="18" /></button>
+          <button class="icon-button" type="button" aria-label="关闭" @click="closeCreateDialog"><X :size="18" /></button>
         </header>
         <form class="stack-form two-column-form" @submit.prevent="createSource.mutate()">
           <label><span>来源名称</span><input v-model="form.name" placeholder="company-gitlab" required /></label>
@@ -191,7 +197,7 @@ function selectSource(source: GitLabSource) {
           <p class="form-hint full-span">Token 不在此页面填写。服务端通过 CODEATLAS_CREDENTIAL_凭据引用读取，例如 CODEATLAS_CREDENTIAL_GITLAB_PLATFORM_READONLY。</p>
           <div v-if="formError" class="error-banner full-span">{{ formError }}</div>
           <div class="form-actions full-span">
-            <button class="secondary-button" type="button" @click="showCreate = false">取消</button>
+            <button class="secondary-button" type="button" @click="closeCreateDialog">取消</button>
             <button class="command-button" type="submit" :disabled="createSource.isPending.value">保存来源</button>
           </div>
         </form>

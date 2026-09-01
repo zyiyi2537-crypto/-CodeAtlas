@@ -121,10 +121,15 @@ describe('mobile layout contract', () => {
     const nestedSectionHeading = exactRuleBlock(mobile, '.section-heading > div')
     const nestedSectionDescription = exactRuleBlock(mobile, '.section-heading > div > span')
     const projectRow = exactRuleBlock(responsiveSources, '.gitlab-project-row')
+    const desktopProjectRow = exactRuleBlock(stylesheet, '.gitlab-project-row')
+    const desktopProjectLink = exactRuleBlock(stylesheet, '.gitlab-project-link')
+    const desktopProjectName = exactRuleBlock(stylesheet, '.gitlab-project-link strong')
+    const desktopProjectBranch = exactRuleBlock(stylesheet, '.gitlab-project-row > .mono-cell')
     const projectTrailingCells = exactRuleBlock(
       responsiveSources,
       '.gitlab-project-row > :nth-child(n + 3)',
     )
+    const projectImport = exactRuleBlock(responsiveSources, '.gitlab-project-import')
 
     expect(globalSourceCard).toContain('flex-wrap: wrap;')
     expect(globalSourceError).toContain('min-width: 0;')
@@ -153,8 +158,18 @@ describe('mobile layout contract', () => {
     expect(nestedSectionHeading).toContain('display: grid;')
     expect(nestedSectionDescription).toContain('overflow-wrap: anywhere;')
     expect(projectRow).toContain('grid-template-columns: 24px minmax(0, 1fr);')
+    expect(desktopProjectRow).toContain(
+      'grid-template-columns: 24px minmax(0, 1fr) 100px auto;',
+    )
+    expect(desktopProjectLink).toContain('min-width: 0;')
+    expect(desktopProjectLink).toContain('overflow-wrap: anywhere;')
+    expect(desktopProjectName).toContain('overflow-wrap: anywhere;')
+    expect(desktopProjectBranch).toContain('min-width: 0;')
+    expect(desktopProjectBranch).toContain('overflow-wrap: anywhere;')
     expect(projectTrailingCells).toContain('grid-column: 2;')
     expect(projectTrailingCells).toContain('justify-self: start;')
+    expect(projectImport).toContain('grid-column: 2;')
+    expect(projectImport).toContain('justify-self: start;')
   })
 
   it('uses touch-safe navigation and dynamic mobile viewport heights', () => {

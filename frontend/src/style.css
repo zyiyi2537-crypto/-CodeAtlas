@@ -2992,9 +2992,13 @@ fieldset small {
 .status-ready { color: var(--green); font-size: 12px; }
 .status-muted { color: var(--muted); font-size: 12px; }
 .gitlab-project-list { display: flex; flex-direction: column; }
-.gitlab-project-row { display: grid; grid-template-columns: 24px 1fr 100px; gap: 10px; align-items: center; padding: 13px 16px; color: var(--text); border-top: 1px solid var(--border); }
+.gitlab-project-row { display: grid; grid-template-columns: 24px minmax(0, 1fr) 100px auto; gap: 10px; align-items: center; padding: 13px 16px; color: var(--text); border-top: 1px solid var(--border); }
 .gitlab-project-row:hover { background: var(--surface-soft); }
-.gitlab-project-row > span:nth-child(2) { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.gitlab-project-link { display: flex; min-width: 0; flex-direction: column; gap: 3px; color: inherit; overflow-wrap: anywhere; }
+.gitlab-project-link strong { overflow-wrap: anywhere; }
+.gitlab-project-link:hover strong { text-decoration: underline; }
+.gitlab-project-row > .mono-cell { min-width: 0; overflow-wrap: anywhere; }
+.gitlab-project-import { justify-self: end; white-space: nowrap; }
 .form-hint { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
 
 @media (max-width: 760px) {
@@ -3037,6 +3041,11 @@ fieldset small {
   }
 
   .gitlab-project-row > :nth-child(n + 3) {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .gitlab-project-import {
     grid-column: 2;
     justify-self: start;
   }

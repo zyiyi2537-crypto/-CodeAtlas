@@ -138,7 +138,7 @@ function closeDialog() {
     </section>
 
     <div v-if="showCreate" class="preview-backdrop" role="presentation" @click.self="closeDialog">
-      <section class="form-dialog" role="dialog" aria-modal="true" aria-label="添加 GitHub 仓库">
+      <section v-modal-dialog="closeDialog" class="form-dialog" role="dialog" aria-modal="true" aria-label="添加 GitHub 仓库">
         <header class="dialog-header">
           <div><p class="eyebrow">NEW GITHUB SOURCE</p><h2>添加 GitHub 仓库</h2></div>
           <button class="icon-button" type="button" aria-label="关闭" @click="closeDialog"><X :size="18" /></button>

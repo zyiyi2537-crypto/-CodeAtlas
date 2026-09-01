@@ -82,6 +82,14 @@ function beginRevoke(id: string) {
   confirmRevoke.value = id
 }
 
+function closeRevokeDialog() {
+  confirmRevoke.value = null
+}
+
+function closeCreateDialog() {
+  showCreate.value = false
+}
+
 function openConnectionDialog(id: string) {
   if (sessionTokens[id]) activeTokenId.value = id
 }
@@ -137,21 +145,21 @@ function toggleRepository(id: string, checked: boolean) {
       <EmptyState v-else title="暂无 Token" />
     </section>
 
-    <div v-if="confirmRevoke" class="preview-backdrop" role="presentation" @click.self="confirmRevoke = null">
-      <section class="form-dialog compact-dialog" role="dialog" aria-modal="true" aria-label="确认撤销">
-        <header class="dialog-header"><div class="dialog-title"><Trash2 :size="20" /><h2>确认撤销</h2></div><button class="icon-button" type="button" aria-label="关闭" @click="confirmRevoke = null"><X :size="18" /></button></header>
+    <div v-if="confirmRevoke" class="preview-backdrop" role="presentation" @click.self="closeRevokeDialog">
+      <section v-modal-dialog="closeRevokeDialog" class="form-dialog compact-dialog" role="dialog" aria-modal="true" aria-label="确认撤销">
+        <header class="dialog-header"><div class="dialog-title"><Trash2 :size="20" /><h2>确认撤销</h2></div><button class="icon-button" type="button" aria-label="关闭" @click="closeRevokeDialog"><X :size="18" /></button></header>
         <p>确定要撤销此 Token 吗？撤销成功后将从有效 Token 列表移除，且无法恢复。</p>
         <div v-if="revokeToken.error.value" class="error-banner">{{ errorMessage(revokeToken.error.value) }}</div>
         <div class="dialog-actions">
-          <button class="secondary-button" type="button" :disabled="revokeToken.isPending.value" @click="confirmRevoke = null">取消</button>
+          <button class="secondary-button" type="button" :disabled="revokeToken.isPending.value" @click="closeRevokeDialog">取消</button>
           <button class="command-button danger" type="button" :disabled="revokeToken.isPending.value" @click="revokeToken.mutate(confirmRevoke!)">{{ revokeToken.isPending.value ? '正在撤销…' : '确认撤销' }}</button>
         </div>
       </section>
     </div>
 
-    <div v-if="showCreate" class="preview-backdrop" role="presentation" @click.self="showCreate = false">
-      <section class="form-dialog compact-dialog" role="dialog" aria-modal="true" aria-label="创建 Token">
-        <header class="dialog-header"><div class="dialog-title"><KeyRound :size="20" /><h2>创建 Token</h2></div><button class="icon-button" type="button" aria-label="关闭" @click="showCreate = false"><X :size="18" /></button></header>
+    <div v-if="showCreate" class="preview-backdrop" role="presentation" @click.self="closeCreateDialog">
+      <section v-modal-dialog="closeCreateDialog" class="form-dialog compact-dialog" role="dialog" aria-modal="true" aria-label="创建 Token">
+        <header class="dialog-header"><div class="dialog-title"><KeyRound :size="20" /><h2>创建 Token</h2></div><button class="icon-button" type="button" aria-label="关闭" @click="closeCreateDialog"><X :size="18" /></button></header>
         <form class="stack-form" @submit.prevent="createToken.mutate()">
           <label><span>名称</span><input v-model="form.name" required /></label>
           <label><span>过期天数（可选）</span><input v-model.number="expiresInDays" type="number" min="1" max="365" placeholder="永不过期" /></label>
@@ -164,7 +172,7 @@ function toggleRepository(id: string, checked: boolean) {
     </div>
 
     <div v-if="revealedToken" class="preview-backdrop" role="presentation">
-      <section class="secret-dialog mcp-connect-dialog" role="dialog" aria-modal="true" aria-label="连接 MCP 客户端">
+      <section v-modal-dialog="closeConnectionDialog" class="secret-dialog mcp-connect-dialog" role="dialog" aria-modal="true" aria-label="连接 MCP 客户端">
         <header class="mcp-connect-header">
           <span class="success-icon"><Server :size="22" /></span>
           <div><p class="eyebrow">REMOTE MCP / STREAMABLE HTTP</p><h2>连接 MCP 客户端</h2></div>

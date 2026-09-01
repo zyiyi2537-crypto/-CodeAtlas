@@ -243,7 +243,7 @@ function credentialLabel(profile: Profile) {
       role="presentation"
       @click.self="closeDialog"
     >
-      <section class="form-dialog" role="dialog" aria-modal="true">
+      <section v-modal-dialog="closeDialog" class="form-dialog" role="dialog" aria-modal="true" :aria-label="editingProfileId ? '编辑 Embedding 模型' : '添加 Embedding 模型'">
         <header class="dialog-header">
           <h2>{{ editingProfileId ? '编辑 Embedding 模型' : '添加 Embedding 模型' }}</h2>
           <button class="icon-button" type="button" aria-label="关闭" @click="closeDialog">

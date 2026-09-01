@@ -73,6 +73,10 @@ function removeMember(member: User) {
   )
   if (confirmed) deleteMember.mutate(member.id)
 }
+
+function closeCreateDialog() {
+  showCreate.value = false
+}
 </script>
 
 <template>
@@ -126,11 +130,11 @@ function removeMember(member: User) {
       <EmptyState v-else title="暂无成员" />
     </section>
 
-    <div v-if="showCreate" class="preview-backdrop" role="presentation" @click.self="showCreate = false">
-      <section class="form-dialog compact-dialog" role="dialog" aria-modal="true" aria-label="新增成员">
+    <div v-if="showCreate" class="preview-backdrop" role="presentation" @click.self="closeCreateDialog">
+      <section v-modal-dialog="closeCreateDialog" class="form-dialog compact-dialog" role="dialog" aria-modal="true" aria-label="新增成员">
         <header class="dialog-header">
           <div class="dialog-title"><UserPlus :size="20" /><h2>新增成员</h2></div>
-          <button class="icon-button" type="button" aria-label="关闭" @click="showCreate = false"><X :size="18" /></button>
+          <button class="icon-button" type="button" aria-label="关闭" @click="closeCreateDialog"><X :size="18" /></button>
         </header>
         <form class="stack-form" @submit.prevent="createMember.mutate()">
           <label><span>显示名称</span><input v-model="form.display_name" required /></label>

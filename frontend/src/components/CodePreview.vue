@@ -33,11 +33,15 @@ const preview = useQuery({
 async function copyCode() {
   if (preview.data.value?.content) await navigator.clipboard.writeText(preview.data.value.content)
 }
+
+function closePreview() {
+  emit('close')
+}
 </script>
 
 <template>
-  <div class="preview-backdrop" role="presentation" @click.self="emit('close')">
-    <section class="code-preview" role="dialog" aria-modal="true" aria-label="文件预览">
+  <div class="preview-backdrop" role="presentation" @click.self="closePreview">
+    <section v-modal-dialog="closePreview" class="code-preview" role="dialog" aria-modal="true" aria-label="文件预览">
       <header class="preview-header">
         <div>
           <strong>{{ result.path }}</strong>
@@ -68,7 +72,7 @@ async function copyCode() {
             type="button"
             data-tooltip="关闭"
             aria-label="关闭"
-            @click="emit('close')"
+            @click="closePreview"
           >
             <X :size="18" />
           </button>

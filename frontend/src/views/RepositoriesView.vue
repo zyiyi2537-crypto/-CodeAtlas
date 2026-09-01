@@ -56,6 +56,10 @@ const archiveRepository = useMutation({
     api.delete(`/repositories/${id}`, { headers: csrfHeaders() }),
   onSuccess: async () => queryClient.invalidateQueries({ queryKey: ['repositories'] }),
 })
+
+function closeCreateDialog() {
+  showCreate.value = false
+}
 </script>
 
 <template>
@@ -103,11 +107,11 @@ const archiveRepository = useMutation({
       <EmptyState v-else title="暂无仓库" />
     </section>
 
-    <div v-if="showCreate" class="preview-backdrop" role="presentation" @click.self="showCreate = false">
-      <section class="form-dialog" role="dialog" aria-modal="true" aria-label="新增仓库">
+    <div v-if="showCreate" class="preview-backdrop" role="presentation" @click.self="closeCreateDialog">
+      <section v-modal-dialog="closeCreateDialog" class="form-dialog" role="dialog" aria-modal="true" aria-label="新增仓库">
         <header class="dialog-header">
           <div><p class="eyebrow">NEW SOURCE</p><h2>新增仓库</h2></div>
-          <button class="icon-button" type="button" aria-label="关闭" @click="showCreate = false"><X :size="18" /></button>
+          <button class="icon-button" type="button" aria-label="关闭" @click="closeCreateDialog"><X :size="18" /></button>
         </header>
         <form class="stack-form two-column-form" @submit.prevent="createRepository.mutate()">
           <label><span>名称</span><input v-model="form.name" pattern="[a-z0-9][a-z0-9._-]+" required /></label>
@@ -119,7 +123,7 @@ const archiveRepository = useMutation({
           <label class="full-span"><span>许可证 URL</span><input v-model="form.license_url" type="url" /></label>
           <div v-if="formError" class="error-banner full-span">{{ formError }}</div>
           <div class="form-actions full-span">
-            <button class="secondary-button" type="button" @click="showCreate = false">取消</button>
+            <button class="secondary-button" type="button" @click="closeCreateDialog">取消</button>
             <button class="command-button" type="submit" :disabled="createRepository.isPending.value">创建仓库</button>
           </div>
         </form>
