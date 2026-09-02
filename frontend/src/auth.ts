@@ -1,6 +1,7 @@
 import { computed, reactive } from 'vue'
 
 import { api } from '@/api'
+import { isAdminRole, isOwnerRole } from '@/roles'
 import type { User } from '@/types'
 
 interface AuthState {
@@ -55,6 +56,7 @@ export function useAuth() {
   return {
     state,
     isAuthenticated: computed(() => Boolean(state.user)),
-    isAdmin: computed(() => state.user?.role === 'admin'),
+    isAdmin: computed(() => isAdminRole(state.user?.role)),
+    isOwner: computed(() => isOwnerRole(state.user?.role)),
   }
 }

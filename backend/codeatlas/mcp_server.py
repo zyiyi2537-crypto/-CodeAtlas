@@ -16,6 +16,7 @@ from .database import create_database, initialize_database
 from .knowledge_search import KnowledgeSearch
 from .models import ApiToken, User
 from .retrieval import CodeRetriever
+from .roles import is_admin_role
 from .security import digest_secret
 from .settings import Settings
 
@@ -89,7 +90,7 @@ def resolve_token_identity(engine, raw_token: str) -> McpIdentity | None:
         ):
             return None
         owner = database.get(User, token.created_by)
-        if not owner or not owner.is_active:
+        if not owner or not owner.is_active or not is_admin_role(owner.role):
             return None
         return McpIdentity(
             scopes=frozenset(json.loads(token.scopes_json)),

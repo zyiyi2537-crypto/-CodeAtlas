@@ -620,16 +620,16 @@ def test_disabling_member_revokes_sessions_but_preserves_chat_memory(
 
     raw_token = "cat_disabled_member_probe"
     with Session(application.state.engine) as session:
-        session.add(
-            ApiToken(
-                name="disabled member token",
-                token_prefix=raw_token[:12],
-                token_hash=digest_secret(raw_token),
-                created_by=member.id,
-            )
+        token = ApiToken(
+            name="disabled member token",
+            token_prefix=raw_token[:12],
+            token_hash=digest_secret(raw_token),
+            created_by=member.id,
         )
+        session.add(token)
         session.commit()
-    assert resolve_token_identity(application.state.engine, raw_token) is not None
+        token_id = token.id
+    assert resolve_token_identity(application.state.engine, raw_token) is None
 
     admin_csrf = login(client, admin.email, "correct horse battery staple")
     disabled = client.patch(
@@ -644,6 +644,9 @@ def test_disabling_member_revokes_sessions_but_preserves_chat_memory(
         assert session.exec(
             select(UserSession).where(UserSession.user_id == member.id)
         ).all() == []
+        stored_token = session.get(ApiToken, token_id)
+        assert stored_token is not None
+        assert stored_token.revoked_at is None
         assert session.get(ChatSession, conversation["id"]) is not None
         assert session.get(UserMemory, memory["id"]) is not None
 

@@ -8,6 +8,7 @@ from fastapi import HTTPException, Request, Response, status
 from sqlmodel import Session, select
 
 from .models import User, UserSession
+from .roles import is_admin_role
 from .security import digest_secret, new_secret
 from .settings import Settings
 
@@ -118,7 +119,7 @@ def require_admin(
     lock_user: bool | None = None,
 ) -> BrowserIdentity:
     identity = require_identity(request, database, lock_user=lock_user)
-    if identity.user.role != "admin":
+    if not is_admin_role(identity.user.role):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Administrator role required")
     return identity
 

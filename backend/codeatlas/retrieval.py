@@ -12,6 +12,7 @@ from .chunker import read_text
 from .embeddings import EmbeddingClient, settings_for_profile
 from .models import EmbeddingProfile, Repository, RepositoryAccess, User
 from .ranking import fuse_and_rerank, rerank_across_source_types, tokenize
+from .roles import is_admin_role
 from .security import redact_secrets, resolve_repository_file
 from .settings import Settings
 from .vector_store import VectorStore, code_generation_namespace
@@ -58,7 +59,7 @@ class CodeRetriever:
                         )
                     )
                 )
-            if user and user.role == "admin":
+            if user and is_admin_role(user.role):
                 return list(session.exec(select(Repository).where(searchable)))
             if user:
                 grants = session.exec(

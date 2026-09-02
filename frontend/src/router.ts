@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
 import { refreshSession, useAuth } from '@/auth'
+import { isAdminRole } from '@/roles'
 import JobsView from '@/views/JobsView.vue'
 import BrowseView from '@/views/BrowseView.vue'
 import ChatView from '@/views/ChatView.vue'
@@ -103,6 +104,6 @@ router.beforeEach(async (to) => {
   if ((to.meta.requiresAuth || to.meta.requiresAdmin) && !state.user) {
     return { name: 'login', query: { redirect: to.fullPath } }
   }
-  if (to.meta.requiresAdmin && state.user?.role !== 'admin') return { name: 'search' }
+  if (to.meta.requiresAdmin && !isAdminRole(state.user?.role)) return { name: 'search' }
   return true
 })

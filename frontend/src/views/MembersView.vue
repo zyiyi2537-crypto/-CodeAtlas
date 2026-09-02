@@ -4,12 +4,15 @@ import { Plus, ShieldCheck, Trash2, UserPlus, X } from 'lucide-vue-next'
 import { reactive, ref } from 'vue'
 
 import { api, errorMessage } from '@/api'
-import { csrfHeaders } from '@/auth'
+import { csrfHeaders, useAuth } from '@/auth'
 import EmptyState from '@/components/EmptyState.vue'
 import { formatDate } from '@/format'
+import { canAssignRole, canManageRole, roleLabel } from '@/roles'
+import type { UserRole } from '@/roles'
 import type { Repository, User } from '@/types'
 
 const queryClient = useQueryClient()
+const { state, isOwner } = useAuth()
 const showCreate = ref(false)
 const formError = ref('')
 const grant = reactive({ userId: '', repositoryId: '' })
@@ -17,7 +20,7 @@ const form = reactive({
   email: '',
   display_name: '',
   password: '',
-  role: 'member',
+  role: 'member' as UserRole,
 })
 
 const members = useQuery({
@@ -50,8 +53,13 @@ const grantRepository = useMutation({
 })
 
 const updateMember = useMutation({
-  mutationFn: async ({ userId, role, isActive }: { userId: string; role?: string; isActive?: boolean }) =>
-    api.patch(`/members/${userId}`, { role, is_active: isActive }, { headers: csrfHeaders() }),
+  mutationFn: async ({ userId, role, isActive }: { userId: string; role?: UserRole; isActive?: boolean }) => {
+    const payload = {
+      ...(role !== undefined ? { role } : {}),
+      ...(isActive !== undefined ? { is_active: isActive } : {}),
+    }
+    return api.patch(`/members/${userId}`, payload, { headers: csrfHeaders() })
+  },
   onSuccess: async () => {
     await queryClient.invalidateQueries({ queryKey: ['members'] })
   },
@@ -76,6 +84,14 @@ function removeMember(member: User) {
 
 function closeCreateDialog() {
   showCreate.value = false
+}
+
+function canManage(member: User): boolean {
+  return Boolean(state.user && canManageRole(state.user.role, member.role))
+}
+
+function canAssign(role: UserRole): boolean {
+  return Boolean(state.user && canAssignRole(state.user.role, role))
 }
 </script>
 
@@ -102,11 +118,26 @@ function closeCreateDialog() {
         <article v-for="member in members.data.value" :key="member.id" class="member-row">
           <div class="avatar">{{ member.display_name.slice(0, 1).toUpperCase() }}</div>
           <div><strong>{{ member.display_name }}</strong><span>{{ member.email }}</span></div>
-          <span class="role-badge">{{ member.role }}</span>
+          <select
+            v-if="isOwner && member.id !== state.user?.id"
+            class="role-select"
+            :data-member-role="member.id"
+            :value="member.role"
+            :aria-label="`修改 ${member.display_name} 的角色`"
+            :disabled="updateMember.isPending.value"
+            @change="updateMember.mutate({ userId: member.id, role: ($event.target as HTMLSelectElement).value as UserRole })"
+          >
+            <option v-if="canAssign('member')" value="member">成员</option>
+            <option v-if="canAssign('workspace_admin')" value="workspace_admin">工作区管理员</option>
+            <option v-if="canAssign('owner')" value="owner">所有者</option>
+            <option v-if="member.role === 'admin'" value="admin" disabled>旧版管理员</option>
+          </select>
+          <span v-else class="role-badge">{{ roleLabel(member.role) }}</span>
           <span>{{ member.is_active ? 'active' : 'disabled' }}</span>
           <span>{{ formatDate(member.created_at) }}</span>
           <div class="row-actions">
             <button
+              v-if="canManage(member) && member.id !== state.user?.id"
               class="icon-button tooltip"
               type="button"
               :data-tooltip="member.is_active ? '禁用成员' : '启用成员'"
@@ -116,6 +147,7 @@ function closeCreateDialog() {
               <ShieldCheck :size="17" />
             </button>
             <button
+              v-if="canManage(member) && member.id !== state.user?.id"
               class="icon-button danger tooltip"
               type="button"
               data-tooltip="删除成员"
@@ -140,7 +172,7 @@ function closeCreateDialog() {
           <label><span>显示名称</span><input v-model="form.display_name" required /></label>
           <label><span>邮箱</span><input v-model="form.email" type="email" required /></label>
           <label><span>初始密码</span><input v-model="form.password" type="password" minlength="12" required /></label>
-          <label><span>角色</span><select v-model="form.role"><option value="member">member</option><option value="admin">admin</option></select></label>
+          <label><span>角色</span><select v-model="form.role"><option v-if="canAssign('member')" value="member">成员</option><option v-if="canAssign('workspace_admin')" value="workspace_admin">工作区管理员</option><option v-if="canAssign('owner')" value="owner">所有者</option></select></label>
           <div v-if="formError" class="error-banner">{{ formError }}</div>
           <button class="command-button full-width" type="submit" :disabled="createMember.isPending.value">创建成员</button>
         </form>

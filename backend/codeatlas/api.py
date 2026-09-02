@@ -94,6 +94,15 @@ from .models import (
     new_id,
     utc_now,
 )
+from .roles import (
+    ASSIGNABLE_ROLES,
+    MEMBER_ROLE,
+    OWNER_ROLE,
+    can_assign_role,
+    can_manage_role,
+    is_admin_role,
+    is_owner_role,
+)
 from .security import (
     contains_secret,
     digest_secret,
@@ -1701,7 +1710,7 @@ def import_gitlab_project(
 def list_repositories(request: Request):
     with database(request) as session:
         identity = resolve_identity(request, session)
-        if identity and identity.user.role == "admin":
+        if identity and is_admin_role(identity.user.role):
             repositories = session.exec(
                 select(Repository).order_by(col(Repository.created_at).desc())
             ).all()
@@ -2730,7 +2739,7 @@ def list_jobs(request: Request):
     with database(request) as session:
         identity = require_identity(request, session)
         statement = select(IndexJob)
-        if identity.user.role != "admin":
+        if not is_admin_role(identity.user.role):
             repository_ids = [
                 repository.id
                 for repository in request.app.state.retriever.allowed_repositories(
@@ -2751,8 +2760,13 @@ def list_jobs(request: Request):
 @router.get("/members")
 def list_members(request: Request):
     with database(request) as session:
-        require_admin(request, session)
-        users = session.exec(select(User).order_by(col(User.created_at))).all()
+        identity = require_admin(request, session)
+        statement = select(User)
+        if not is_owner_role(identity.user.role):
+            statement = statement.where(
+                (User.id == identity.user.id) | (User.role == MEMBER_ROLE)
+            )
+        users = session.exec(statement.order_by(col(User.created_at))).all()
         return [public_user(user) for user in users]
 
 
@@ -2777,11 +2791,46 @@ def update_member(user_id: str, payload: MemberUpdate, request: Request):
                 )
             if not user:
                 raise HTTPException(status.HTTP_404_NOT_FOUND, "Member not found")
+            if not is_admin_role(identity_user.role):
+                raise HTTPException(
+                    status.HTTP_403_FORBIDDEN, "Administrator role required"
+                )
+            if not can_manage_role(identity_user.role, user.role):
+                raise HTTPException(
+                    status.HTTP_403_FORBIDDEN,
+                    "Only an owner can manage administrators",
+                )
             if payload.role is not None:
-                if payload.role not in {"admin", "member"}:
+                if payload.role not in ASSIGNABLE_ROLES:
                     raise HTTPException(
                         status.HTTP_422_UNPROCESSABLE_CONTENT, "Invalid role"
                     )
+                if not can_assign_role(identity_user.role, payload.role):
+                    raise HTTPException(
+                        status.HTTP_403_FORBIDDEN,
+                        "Only an owner can assign administrator roles",
+                    )
+            removes_active_owner = (
+                user.role == OWNER_ROLE
+                and user.is_active
+                and (
+                    (payload.role is not None and payload.role != OWNER_ROLE)
+                    or payload.is_active is False
+                )
+            )
+            if removes_active_owner:
+                active_owner_count = session.exec(
+                    select(func.count()).select_from(User).where(
+                        User.role == OWNER_ROLE,
+                        User.is_active,
+                    )
+                ).one()
+                if active_owner_count <= 1:
+                    raise HTTPException(
+                        status.HTTP_409_CONFLICT,
+                        "The last active owner cannot be changed",
+                    )
+            if payload.role is not None:
                 user.role = payload.role
             if payload.is_active is not None:
                 user.is_active = payload.is_active
@@ -2824,8 +2873,29 @@ def delete_member(user_id: str, request: Request):
                 )
             if not user:
                 raise HTTPException(status.HTTP_404_NOT_FOUND, "Member not found")
+            if not is_admin_role(identity_user.role):
+                raise HTTPException(
+                    status.HTTP_403_FORBIDDEN, "Administrator role required"
+                )
             if user.id == identity_user.id:
                 raise HTTPException(status.HTTP_400_BAD_REQUEST, "Cannot delete yourself")
+            if not can_manage_role(identity_user.role, user.role):
+                raise HTTPException(
+                    status.HTTP_403_FORBIDDEN,
+                    "Only an owner can manage administrators",
+                )
+            if user.role == OWNER_ROLE and user.is_active:
+                active_owner_count = session.exec(
+                    select(func.count()).select_from(User).where(
+                        User.role == OWNER_ROLE,
+                        User.is_active,
+                    )
+                ).one()
+                if active_owner_count <= 1:
+                    raise HTTPException(
+                        status.HTTP_409_CONFLICT,
+                        "The last active owner cannot be deleted",
+                    )
             actor_id = identity_user.id
             user.is_active = False
             session.add(user)
@@ -2908,12 +2978,18 @@ def delete_member(user_id: str, request: Request):
 
 @router.post("/members", status_code=201)
 def create_member(payload: MemberCreate, request: Request):
-    with database(request) as session:
-        identity = require_admin(request, session)
+    with locked_member_lifecycle_request(request) as connection:
+      with Session(connection) as session:
+        identity = require_admin(request, session, lock_user=False)
         require_csrf(request, identity)
         email = payload.email.strip().lower()
-        if payload.role not in {"admin", "member"}:
+        if payload.role not in ASSIGNABLE_ROLES:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Invalid role")
+        if not can_assign_role(identity.user.role, payload.role):
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "Only an owner can assign administrator roles",
+            )
         if session.exec(select(User).where(User.email == email)).first():
             raise HTTPException(status.HTTP_409_CONFLICT, "Email already exists")
         user = User(
@@ -2939,6 +3015,11 @@ def grant_repository(user_id: str, repository_id: str, request: Request):
         ).first()
         if not user or not session.get(Repository, repository_id):
             raise HTTPException(status.HTTP_404_NOT_FOUND, "User or repository not found")
+        if not can_manage_role(identity.user.role, user.role):
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "Only an owner can manage administrator access",
+            )
         existing = session.exec(select(RepositoryAccess).where(
             RepositoryAccess.user_id == user_id,
             RepositoryAccess.repository_id == repository_id,
@@ -2960,6 +3041,11 @@ def revoke_repository(user_id: str, repository_id: str, request: Request):
         ).first()
         if not user:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+        if not can_manage_role(identity.user.role, user.role):
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "Only an owner can manage administrator access",
+            )
         access = session.exec(select(RepositoryAccess).where(
             RepositoryAccess.user_id == user_id,
             RepositoryAccess.repository_id == repository_id,
@@ -2974,10 +3060,11 @@ def revoke_repository(user_id: str, repository_id: str, request: Request):
 @router.get("/tokens")
 def list_tokens(request: Request):
     with database(request) as session:
-        require_admin(request, session)
-        tokens = session.exec(
-            select(ApiToken).order_by(col(ApiToken.created_at).desc())
-        ).all()
+        identity = require_admin(request, session)
+        statement = select(ApiToken)
+        if not is_owner_role(identity.user.role):
+            statement = statement.where(ApiToken.created_by == identity.user.id)
+        tokens = session.exec(statement.order_by(col(ApiToken.created_at).desc())).all()
         return [serialize_token(token) for token in tokens]
 
 
@@ -3027,6 +3114,8 @@ def revoke_token(token_id: str, request: Request):
         require_csrf(request, identity)
         token = session.get(ApiToken, token_id)
         if not token:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Token not found")
+        if token.created_by != identity.user.id and not is_owner_role(identity.user.role):
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Token not found")
         token.revoked_at = utc_now()
         session.add(token)

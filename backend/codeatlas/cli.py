@@ -14,7 +14,9 @@ from .index_job_schedule_lock import index_job_schedule_lock
 from .indexing import IndexCoordinator
 from .job_queue import IndexJobQueue, JobRequest
 from .legacy_migration import migrate_sqlite_database
+from .member_lifecycle_lock import member_lifecycle_lock
 from .models import IndexJob, Repository, User
+from .roles import ADMIN_ROLES, OWNER_ROLE, configure_single_workspace_roles
 from .security import hash_password, validate_git_url
 from .settings import Settings
 
@@ -59,21 +61,25 @@ def create_admin(args) -> None:
     if not password:
         password = getpass.getpass("Password: ")
     email = args.email.strip().lower()
-    with Session(engine) as session:
-        if session.exec(select(User).where(User.email == email)).first():
-            raise SystemExit("User already exists")
-        session.add(User(
-            email=email, display_name=args.name.strip(),
-            password_hash=hash_password(password), role="admin",
-        ))
-        session.commit()
+    password_hash = hash_password(password)
+    with member_lifecycle_lock(engine) as connection:
+        with Session(connection) as session:
+            if session.exec(select(User).where(User.email == email)).first():
+                raise SystemExit("User already exists")
+            session.add(User(
+                email=email, display_name=args.name.strip(),
+                password_hash=password_hash, role=OWNER_ROLE,
+            ))
+            session.commit()
     print(f"Created administrator {email}")
 
 
 def seed_demo(_args) -> None:
     settings, engine = resources()
     with Session(engine) as session:
-        admin = session.exec(select(User).where(User.role == "admin")).first()
+        admin = session.exec(
+            select(User).where(col(User.role).in_(ADMIN_ROLES))
+        ).first()
         if not admin:
             raise SystemExit("Create an administrator first")
         for (
@@ -103,7 +109,9 @@ def index_demo(_args) -> None:
     queue = IndexJobQueue(engine)
     with index_job_schedule_lock(engine):
         with Session(engine) as session:
-            admin = session.exec(select(User).where(User.role == "admin")).first()
+            admin = session.exec(
+                select(User).where(col(User.role).in_(ADMIN_ROLES))
+            ).first()
             repositories = session.exec(
                 select(Repository)
                 .where(col(Repository.name).in_(names))
@@ -154,6 +162,18 @@ def migrate_sqlite(args) -> None:
     print(json.dumps(counts, sort_keys=True))
 
 
+def configure_roles(args) -> None:
+    settings = Settings.load()
+    engine = create_database(settings)
+    try:
+        counts = configure_single_workspace_roles(engine, args.owner_email)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    finally:
+        engine.dispose()
+    print(json.dumps(counts, sort_keys=True))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="codeatlas")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -165,6 +185,9 @@ def main() -> None:
     admin.add_argument("--password")
     admin.add_argument("--password-env", default="CODEATLAS_BOOTSTRAP_ADMIN_PASSWORD")
     admin.set_defaults(function=create_admin)
+    role_setup = subparsers.add_parser("configure-roles")
+    role_setup.add_argument("--owner-email", required=True)
+    role_setup.set_defaults(function=configure_roles)
     demo = subparsers.add_parser("seed-demo")
     demo.set_defaults(function=seed_demo)
     index = subparsers.add_parser("index-demo")

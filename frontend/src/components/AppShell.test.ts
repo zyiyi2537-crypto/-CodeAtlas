@@ -69,6 +69,40 @@ describe('AppShell', () => {
     expect(wrapper.text()).toContain('外部知识源')
   })
 
+  it.each(['owner', 'workspace_admin'] as const)(
+    'renders administration destinations for %s',
+    async (role) => {
+      const { state } = useAuth()
+      state.user = {
+        id: `${role}-1`,
+        email: `${role}@example.com`,
+        display_name: role,
+        role,
+        is_active: true,
+        created_at: '2026-09-02T00:00:00Z',
+      }
+      state.csrfToken = 'test-csrf'
+      state.initialized = true
+
+      const router = createRouter({
+        history: createMemoryHistory(),
+        routes: [
+          { path: '/', component: EmptyView },
+          { path: '/:pathMatch(.*)*', component: EmptyView },
+        ],
+      })
+      await router.push('/')
+      await router.isReady()
+
+      const wrapper = mount(AppShell, {
+        global: { plugins: [router] },
+      })
+
+      expect(wrapper.text()).toContain('成员')
+      expect(wrapper.text()).toContain('API Token')
+    },
+  )
+
   it('includes an anonymous login destination in the mobile navigation', async () => {
     const { state } = useAuth()
     state.user = null

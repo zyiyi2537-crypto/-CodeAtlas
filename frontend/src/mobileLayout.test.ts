@@ -215,6 +215,37 @@ describe('mobile layout contract', () => {
     )
   })
 
+  it('keeps long member role controls inside desktop and phone rows', () => {
+    const compactStylesheet = compact(stylesheet)
+    const mobile = mediaBlocks(stylesheet, '@media (max-width: 760px)')
+    const memberRow = exactRuleBlock(compactStylesheet, '.member-row')
+    const roleSelect = exactRuleBlock(compactStylesheet, '.role-select')
+    const mobileRoleSelect = exactRuleBlock(mobile, '.member-row > .role-select')
+    const mobileActions = exactRuleBlock(mobile, '.member-row > .row-actions')
+
+    expect(memberRow).toContain(
+      'grid-template-columns: 40px minmax(180px, 1fr) minmax(130px, 170px) 80px 110px auto;',
+    )
+    expect(roleSelect).toContain('min-width: 0;')
+    expect(roleSelect).toContain('max-width: 100%;')
+    expect(mobileRoleSelect).toContain('grid-column: 2;')
+    expect(mobileRoleSelect).toContain('width: 100%;')
+    expect(mobileActions).toContain('grid-column: 3;')
+  })
+
+  it('reflows member rows beside the persistent sidebar on tablet widths', () => {
+    const tablet = mediaBlocks(
+      stylesheet,
+      '@media (min-width: 761px) and (max-width: 1100px)',
+    )
+    expect(tablet).toContain(
+      '.member-row { grid-template-columns: 40px minmax(0, 1fr) minmax(120px, 160px) auto;',
+    )
+    expect(tablet).toContain(
+      '.member-row > span:nth-child(4), .member-row > span:nth-child(5) { display: none;',
+    )
+  })
+
   it('keeps blog navigation and footer links touch-friendly on phones', () => {
     const blogMobile = mediaBlocks(blogLayout, '@media (max-width: 640px)')
 

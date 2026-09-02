@@ -23,6 +23,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { logout, useAuth } from '@/auth'
 import { api } from '@/api'
 import { csrfHeaders } from '@/auth'
+import { roleLabel } from '@/roles'
 
 const route = useRoute()
 const router = useRouter()
@@ -167,7 +168,7 @@ async function signOutAll() {
         <div class="avatar">{{ state.user.display_name.slice(0, 1).toUpperCase() }}</div>
         <div class="account-copy">
           <strong>{{ state.user.display_name }}</strong>
-          <span>{{ state.user.role }}</span>
+          <span>{{ roleLabel(state.user.role) }}</span>
         </div>
         <button
           class="icon-button tooltip"

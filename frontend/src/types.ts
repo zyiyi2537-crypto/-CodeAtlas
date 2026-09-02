@@ -1,8 +1,10 @@
+import type { UserRole } from '@/roles'
+
 export interface User {
   id: string
   email: string
   display_name: string
-  role: 'admin' | 'member'
+  role: UserRole
   is_active: boolean
   created_at: string
 }
