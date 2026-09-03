@@ -24,7 +24,7 @@ const isSecureMcp = computed(() => window.location.protocol === 'https:' || ['lo
 const installConfig = computed(() => {
   const authorization = `Bearer ${revealedToken.value}`
   if (installTarget.value === 'codex') {
-    return `[mcp_servers.codeatlas]\nurl = "${mcpUrl.value}"\nhttp_headers = { Authorization = "${authorization}" }`
+    return `codex mcp add codeatlas --url "${mcpUrl.value}" --bearer-token-env-var CODEATLAS_MCP_TOKEN`
   }
   if (installTarget.value === 'claude') {
     return `claude mcp add --transport http --scope user codeatlas "${mcpUrl.value}" --header "Authorization: ${authorization}"`
@@ -199,7 +199,7 @@ function toggleRepository(id: string, checked: boolean) {
             <button class="secondary-button compact-copy" type="button" @click="copyValue('config', installConfig)"><Check v-if="copied === 'config'" :size="16" /><Copy v-else :size="16" />{{ copied === 'config' ? '已复制' : '复制配置' }}</button>
           </div>
           <pre><code>{{ installConfig }}</code></pre>
-          <p v-if="installTarget === 'codex'" class="config-note">添加到 <code>~/.codex/config.toml</code>，然后重新启动 Codex。</p>
+          <p v-if="installTarget === 'codex'" class="config-note">先在本机将 Token 保存为 <code>CODEATLAS_MCP_TOKEN</code> 环境变量，再执行该命令。请勿将 Token 明文写入 <code>config.toml</code>；完成后须完全退出并重新启动 Codex。</p>
           <p v-else-if="installTarget === 'claude'" class="config-note">在终端执行该命令，然后使用 <code>claude mcp list</code> 检查连接。</p>
           <p v-else class="config-note">适用于支持远程 HTTP MCP 和自定义请求头的客户端。</p>
         </div>

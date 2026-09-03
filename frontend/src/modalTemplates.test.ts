@@ -36,4 +36,11 @@ describe('modal template contract', () => {
     expect(row).not.toContain('<button')
     expect(markup).toContain('gitlab-project-import')
   })
+
+  it('keeps Codex MCP credentials out of config.toml', () => {
+    const markup = source('./views/TokensView.vue')
+
+    expect(markup).toContain('--bearer-token-env-var CODEATLAS_MCP_TOKEN')
+    expect(markup).not.toContain('http_headers = { Authorization')
+  })
 })

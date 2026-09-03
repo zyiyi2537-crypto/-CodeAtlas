@@ -658,7 +658,7 @@ def test_stdio_mcp_revalidates_identity_for_every_tool_call(monkeypatch) -> None
         def __init__(self, *_args, **_kwargs):
             pass
 
-        def tool(self):
+        def tool(self, **_kwargs):
             def register(function):
                 registered[function.__name__] = function
                 return function
@@ -700,6 +700,71 @@ def test_stdio_mcp_revalidates_identity_for_every_tool_call(monkeypatch) -> None
     assert list_repositories() == []
     with pytest.raises(PermissionError, match="status"):
         list_repositories()
+
+
+def test_mcp_tools_are_declared_read_only(monkeypatch) -> None:
+    annotations_by_tool: dict[str, object] = {}
+
+    class FakeFastMCP:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def tool(self, **kwargs):
+            def register(function):
+                annotations_by_tool[function.__name__] = kwargs.get("annotations")
+                return function
+
+            return register
+
+        def streamable_http_app(self):
+            return object()
+
+    class Retriever:
+        def __init__(self):
+            self.vector_store = type("Store", (), {"count": lambda self: 0})()
+
+    settings = type(
+        "Settings",
+        (),
+        {"mcp_allowed_hosts": ("localhost",), "public_origin": "https://example.com"},
+    )()
+    monkeypatch.setattr(mcp_server, "FastMCP", FakeFastMCP)
+
+    mcp_server.build_mcp(
+        settings,
+        object(),
+        Retriever(),
+        default_identity=McpIdentity(
+            scopes=frozenset({"status", "search", "read"}),
+            repository_ids=(),
+        ),
+        knowledge_search=object(),
+    )
+
+    assert set(annotations_by_tool) == {
+        "list_repositories",
+        "index_status",
+        "search_code",
+        "grep_code",
+        "find_references",
+        "get_file",
+        "search_documents",
+        "search_wiki",
+        "get_wiki_page",
+        "search_knowledge",
+    }
+    for tool_annotations in annotations_by_tool.values():
+        assert tool_annotations is not None
+        assert tool_annotations.readOnlyHint is True
+        assert tool_annotations.destructiveHint is False
+    open_world_tools = {
+        "search_code",
+        "search_documents",
+        "search_wiki",
+        "search_knowledge",
+    }
+    for name, tool_annotations in annotations_by_tool.items():
+        assert tool_annotations.openWorldHint is (name in open_world_tools)
 
 
 def test_member_delete_waits_for_inflight_chat_turn(

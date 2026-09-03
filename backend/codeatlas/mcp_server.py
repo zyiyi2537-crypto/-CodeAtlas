@@ -10,6 +10,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import ToolAnnotations
 from sqlmodel import Session, select
 
 from .database import create_database, initialize_database
@@ -29,6 +30,20 @@ class McpIdentity:
 
 CURRENT_MCP_IDENTITY: contextvars.ContextVar[McpIdentity | None] = contextvars.ContextVar(
     "codeatlas_mcp_identity", default=None
+)
+
+READ_ONLY_TOOL_ANNOTATIONS = ToolAnnotations(
+    readOnlyHint=True,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=False,
+)
+
+OPEN_WORLD_READ_ONLY_TOOL_ANNOTATIONS = ToolAnnotations(
+    readOnlyHint=True,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=True,
 )
 
 
@@ -132,7 +147,7 @@ def build_mcp(
             raise PermissionError(f"MCP token requires the {required_scope} scope")
         return value
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
     def list_repositories() -> list[dict]:
         """List repositories available to the current MCP token."""
         current = identity("status")
@@ -144,7 +159,7 @@ def build_mcp(
             "commit": repo.last_commit, "chunks": repo.chunk_count,
         } for repo in repositories]
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
     def index_status() -> dict:
         """Return public repository and index status."""
         return {
@@ -152,7 +167,7 @@ def build_mcp(
             "vector_chunks": retriever.vector_store.count(),
         }
 
-    @mcp.tool()
+    @mcp.tool(annotations=OPEN_WORLD_READ_ONLY_TOOL_ANNOTATIONS)
     def search_code(
         query: str, repository: str | None = None,
         language: str | None = None, top_k: int = 5,
@@ -170,7 +185,7 @@ def build_mcp(
             ),
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
     def grep_code(
         pattern: str, repository: str | None = None,
         limit: int = 20, regex: bool = False,
@@ -188,12 +203,12 @@ def build_mcp(
             current.repository_ids if current.repository_ids else None,
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
     def find_references(symbol: str, repository: str | None = None, limit: int = 20) -> list[dict]:
         """Find exact textual references to a symbol."""
         return grep_code(symbol, repository, limit, False)
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
     def get_file(
         repository: str, path: str, start_line: int = 1, end_line: int = 200,
     ) -> dict:
@@ -210,7 +225,7 @@ def build_mcp(
             current.repository_ids if current.repository_ids else None,
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations=OPEN_WORLD_READ_ONLY_TOOL_ANNOTATIONS)
     def search_documents(query: str, collection: str | None = None) -> list[dict]:
         """Search accessible uploaded project documents and return cited sections."""
         identity("read")
@@ -218,19 +233,19 @@ def build_mcp(
             query, [collection] if collection else None
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations=OPEN_WORLD_READ_ONLY_TOOL_ANNOTATIONS)
     def search_wiki(query: str) -> list[dict]:
         """Search published source-tracked Wiki pages without loading whole pages."""
         identity("read")
         return knowledge_search.search_wiki(query)
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
     def get_wiki_page(path: str) -> dict:
         """Read one published Wiki page with its provenance sources."""
         identity("read")
         return knowledge_search.get_wiki_page(path)
 
-    @mcp.tool()
+    @mcp.tool(annotations=OPEN_WORLD_READ_ONLY_TOOL_ANNOTATIONS)
     def search_knowledge(
         query: str,
         source_types: list[str] | None = None,
