@@ -72,7 +72,17 @@ def test_account_chat_session_persists_messages_and_is_tenant_isolated(
         def __init__(self, *_args, **_kwargs):
             pass
 
-        def ask(self, question, user, repository_ids=None, history=None, memories=None):
+        def ask(
+            self,
+            question,
+            user,
+            repository_ids=None,
+            history=None,
+            memories=None,
+            authorization_scope=None,
+        ):
+            assert authorization_scope is not None
+            assert authorization_scope.actor_user_id == first.id
             captured_histories.append(history or [])
             return {"answer": f"回答：{question}", "citations": []}
 
@@ -242,7 +252,17 @@ def test_concurrent_api_turns_are_serialized_with_fresh_history(
         def __init__(self, *_args, **_kwargs):
             pass
 
-        def ask(self, question, _user, _repositories, history, _memories):
+        def ask(
+            self,
+            question,
+            _user,
+            _repositories,
+            history,
+            _memories,
+            authorization_scope=None,
+        ):
+            assert authorization_scope is not None
+            assert authorization_scope.actor_user_id == member.id
             captured[question] = list(history)
             if question == "first":
                 first_started.set()
@@ -526,7 +546,17 @@ def test_account_memory_is_isolated_secret_safe_and_injected_into_chat(
         def __init__(self, *_args, **_kwargs):
             pass
 
-        def ask(self, question, user, repository_ids=None, history=None, memories=None):
+        def ask(
+            self,
+            question,
+            user,
+            repository_ids=None,
+            history=None,
+            memories=None,
+            authorization_scope=None,
+        ):
+            assert authorization_scope is not None
+            assert authorization_scope.actor_user_id == first.id
             captured_memories.append(memories or [])
             return {"answer": "已按偏好回答", "citations": []}
 
@@ -629,7 +659,9 @@ def test_disabling_member_revokes_sessions_but_preserves_chat_memory(
         session.add(token)
         session.commit()
         token_id = token.id
-    assert resolve_token_identity(application.state.engine, raw_token) is None
+    active_identity = resolve_token_identity(application.state.engine, raw_token)
+    assert active_identity is not None
+    assert active_identity.actor_user_id == member.id
 
     admin_csrf = login(client, admin.email, "correct horse battery staple")
     disabled = client.patch(

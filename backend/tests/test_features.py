@@ -64,7 +64,16 @@ def test_chat_answers_with_citations(
         def __init__(self, *_args, **_kwargs):
             pass
 
-        def ask(self, question, user, repository_ids=None, history=None):
+        def ask(
+            self,
+            question,
+            user,
+            repository_ids=None,
+            history=None,
+            authorization_scope=None,
+        ):
+            assert authorization_scope is not None
+            assert authorization_scope.actor_user_id == admin.id
             return {
                 "answer": "入口在 src/app.py 的 main 函数 [1]。",
                 "citations": [
