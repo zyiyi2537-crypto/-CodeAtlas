@@ -33,6 +33,7 @@ playwright-report/
 test-results/
 .release/
 output/playwright/
+.playwright-cli/
 .server-cache/
 .hermes/
 output/

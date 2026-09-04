@@ -63,6 +63,12 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          if-no-files-found: error
+          retention-days: 3
 
   blog:
     runs-on: ubuntu-latest
@@ -81,6 +87,12 @@ jobs:
           cache-dependency-path: blog/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blog-dist
+          path: blog/dist
+          if-no-files-found: error
+          retention-days: 3
 
   secrets:
     runs-on: ubuntu-latest

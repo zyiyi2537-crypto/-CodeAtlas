@@ -112,7 +112,7 @@ function closeDialog() {
     <section class="data-section">
       <div class="section-heading">
         <h2>自动同步仓库</h2>
-        <span>CodeAtlas 每分钟检查一次，发现新提交后自动建立索引任务</span>
+        <span>CodeAtlas 按各来源配置的间隔检查，发现新提交后自动建立索引任务</span>
       </div>
       <div v-if="sources.data.value?.length" class="source-card-grid">
         <article v-for="source in sources.data.value" :key="source.id" class="source-card">

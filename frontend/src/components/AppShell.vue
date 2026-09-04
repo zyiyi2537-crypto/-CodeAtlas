@@ -14,6 +14,7 @@ import {
   Menu,
   MessageSquareText,
   Search,
+  ScrollText,
   Users,
   X,
 } from 'lucide-vue-next'
@@ -33,19 +34,20 @@ const logoUrl = `${import.meta.env.BASE_URL}codeatlas-mark.svg`
 
 const navigation = computed(() => {
   const items = [
-    { to: '/', label: '代码搜索', icon: Search, public: true },
+    { to: '/', label: '统一搜索', icon: Search, public: true },
     { to: '/chat', label: '代码问答', icon: MessageSquareText },
     { to: '/browse', label: '代码浏览', icon: FolderTree },
-    { to: '/documents', label: '项目文档', icon: FileText },
+    { to: '/overview', label: '空间概览', icon: Gauge },
+    { to: '/repositories', label: '仓库', icon: Database },
+    { to: '/documents', label: '文档', icon: FileText },
     { to: '/external-sources', label: '外部知识源', icon: Cloud, admin: true },
-    { to: '/overview', label: '概览', icon: Gauge },
+    { to: '/company-conventions', label: '公司工程规范', icon: ScrollText },
+    { to: '/members', label: '成员与权限', icon: Users, admin: true },
     { to: '/jobs', label: '索引任务', icon: Boxes },
-    { to: '/repositories', label: '仓库', icon: Database, admin: true },
     { to: '/gitlab-sources', label: 'GitLab 来源', icon: Cloud, admin: true },
     { to: '/github-sources', label: 'GitHub 来源', icon: Cloud, admin: true },
     { to: '/embedding-profiles', label: 'Embedding 模型', icon: Cpu, admin: true },
-    { to: '/members', label: '成员', icon: Users, admin: true },
-    { to: '/tokens', label: 'API Token', icon: KeyRound, admin: true },
+    { to: '/tokens', label: 'API Token', icon: KeyRound },
   ]
   return items.filter((item) => item.public || (state.user && (!item.admin || isAdmin.value)))
 })
@@ -59,23 +61,24 @@ const navigationGroups = computed(() => {
     },
     {
       letter: 'B',
-      label: '知识库',
-      paths: ['/documents', '/external-sources'],
+      label: '知识空间',
+      paths: [
+        '/overview',
+        '/repositories',
+        '/documents',
+        '/external-sources',
+        '/company-conventions',
+        '/members',
+      ],
     },
     {
       letter: 'C',
-      label: '索引运维',
-      paths: ['/overview', '/jobs'],
-    },
-    {
-      letter: 'D',
-      label: '管理',
+      label: '平台管理',
       paths: [
-        '/repositories',
+        '/jobs',
         '/gitlab-sources',
         '/github-sources',
         '/embedding-profiles',
-        '/members',
         '/tokens',
       ],
     },

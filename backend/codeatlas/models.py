@@ -6,6 +6,9 @@ from datetime import UTC, datetime
 from sqlalchemy import Column, Index, Text, UniqueConstraint
 from sqlmodel import Field, SQLModel
 
+DEFAULT_WORKSPACE_ID = "default-workspace"
+DEFAULT_SPACE_ID = "default-space"
+
 
 def new_id() -> str:
     return uuid.uuid4().hex
@@ -80,6 +83,41 @@ class UserMemory(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utc_now, index=True)
 
 
+class Workspace(SQLModel, table=True):
+    id: str = Field(default_factory=new_id, primary_key=True, max_length=32)
+    name: str = Field(unique=True, max_length=120)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class KnowledgeSpace(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "name", name="uq_knowledge_space_name"),
+    )
+
+    id: str = Field(default_factory=new_id, primary_key=True, max_length=32)
+    workspace_id: str = Field(
+        foreign_key="workspace.id", index=True, max_length=32
+    )
+    name: str = Field(max_length=120)
+    description: str = Field(default="", max_length=500)
+    visibility: str = Field(default="workspace", index=True, max_length=20)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class SpaceGrant(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("space_id", "user_id", name="uq_space_grant"),
+    )
+
+    id: str = Field(default_factory=new_id, primary_key=True, max_length=32)
+    space_id: str = Field(
+        foreign_key="knowledgespace.id", index=True, max_length=32
+    )
+    user_id: str = Field(foreign_key="user.id", index=True, max_length=32)
+    role: str = Field(default="viewer", index=True, max_length=20)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
 class GitLabSource(SQLModel, table=True):
     id: str = Field(default_factory=new_id, primary_key=True, max_length=32)
     name: str = Field(index=True, unique=True, max_length=100)
@@ -120,6 +158,12 @@ class DocumentCollection(SQLModel, table=True):
     id: str = Field(default_factory=new_id, primary_key=True, max_length=32)
     name: str = Field(unique=True, max_length=120)
     description: str = Field(default="", max_length=500)
+    space_id: str = Field(
+        default=DEFAULT_SPACE_ID,
+        foreign_key="knowledgespace.id",
+        index=True,
+        max_length=32,
+    )
     created_by: str = Field(foreign_key="user.id", max_length=32)
     created_at: datetime = Field(default_factory=utc_now)
 
@@ -152,6 +196,12 @@ class DocumentChunkRecord(SQLModel, table=True):
     id: str = Field(primary_key=True, max_length=64)
     document_id: str = Field(foreign_key="document.id", index=True, max_length=32)
     collection_id: str = Field(foreign_key="documentcollection.id", index=True, max_length=32)
+    space_id: str = Field(
+        default=DEFAULT_SPACE_ID,
+        foreign_key="knowledgespace.id",
+        index=True,
+        max_length=32,
+    )
     title: str = Field(max_length=300)
     section: str = Field(default="", max_length=500)
     page: int | None = None
@@ -210,9 +260,16 @@ class WikiPage(SQLModel, table=True):
             mysql_prefix="FULLTEXT",
             mysql_with_parser="ngram",
         ),
+        UniqueConstraint("space_id", "path", name="uq_wiki_page_space_path"),
     )
 
     id: str = Field(default_factory=new_id, primary_key=True, max_length=32)
+    space_id: str = Field(
+        default=DEFAULT_SPACE_ID,
+        foreign_key="knowledgespace.id",
+        index=True,
+        max_length=32,
+    )
     path: str = Field(index=True, max_length=500)
     title: str = Field(max_length=300)
     content: str = Field(sa_column=Column(Text, nullable=False))
@@ -221,6 +278,29 @@ class WikiPage(SQLModel, table=True):
     created_by: str = Field(foreign_key="user.id", max_length=32)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+
+class CompanyConvention(SQLModel, table=True):
+    id: str = Field(default_factory=new_id, primary_key=True, max_length=32)
+    space_id: str = Field(
+        default=DEFAULT_SPACE_ID,
+        foreign_key="knowledgespace.id",
+        index=True,
+        max_length=32,
+    )
+    title: str = Field(max_length=200)
+    category: str = Field(index=True, max_length=50)
+    language: str = Field(default="", index=True, max_length=50)
+    framework: str = Field(default="", index=True, max_length=100)
+    task: str = Field(default="", max_length=200)
+    rule: str = Field(sa_column=Column(Text, nullable=False))
+    prohibited_pattern: str = Field(default="", sa_column=Column(Text, nullable=False))
+    examples_json: str = Field(default="[]", sa_column=Column(Text, nullable=False))
+    citations_json: str = Field(default="[]", sa_column=Column(Text, nullable=False))
+    status: str = Field(default="draft", index=True, max_length=20)
+    created_by: str = Field(foreign_key="user.id", max_length=32)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now, index=True)
 
 
 class EmbeddingProfile(SQLModel, table=True):
@@ -255,6 +335,12 @@ class Repository(SQLModel, table=True):
     id: str = Field(default_factory=new_id, primary_key=True, max_length=32)
     name: str = Field(index=True, unique=True, max_length=80)
     description: str = Field(default="", max_length=500)
+    space_id: str = Field(
+        default=DEFAULT_SPACE_ID,
+        foreign_key="knowledgespace.id",
+        index=True,
+        max_length=32,
+    )
     git_url: str = Field(max_length=1000)
     branch: str = Field(default="main", max_length=200)
     visibility: str = Field(default="private", index=True, max_length=20)
@@ -295,6 +381,10 @@ class ApiToken(SQLModel, table=True):
         sa_column=Column(Text, nullable=False),
     )
     repository_ids_json: str = Field(default="[]", sa_column=Column(Text, nullable=False))
+    space_ids_json: str = Field(
+        default=f'["{DEFAULT_SPACE_ID}"]',
+        sa_column=Column(Text, nullable=False),
+    )
     created_by: str = Field(foreign_key="user.id", max_length=32)
     expires_at: datetime | None = None
     revoked_at: datetime | None = None
@@ -341,6 +431,12 @@ class CodeChunkRecord(SQLModel, table=True):
     id: str = Field(primary_key=True, max_length=64)
     generation_id: str = Field(foreign_key="indexgeneration.id", index=True, max_length=32)
     repository_id: str = Field(foreign_key="repository.id", index=True, max_length=32)
+    space_id: str = Field(
+        default=DEFAULT_SPACE_ID,
+        foreign_key="knowledgespace.id",
+        index=True,
+        max_length=32,
+    )
     commit: str = Field(max_length=64)
     path: str = Field(max_length=1000)
     language: str = Field(index=True, max_length=50)

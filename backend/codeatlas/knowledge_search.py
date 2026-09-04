@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from sqlalchemy import text
 from sqlmodel import Session, col, select
 
+from .authorization import AuthorizationScope
 from .documents import StructuredBlock, split_structured_blocks
 from .embeddings import EmbeddingClient
 from .models import Document, DocumentChunkRecord, EmbeddingProfile, WikiPage
@@ -157,13 +158,32 @@ class KnowledgeSearch:
             )
         return candidates
 
-    def _wiki_fulltext_pages(self, terms: list[str], limit: int) -> list[WikiPage]:
+    def _wiki_fulltext_pages(
+        self,
+        terms: list[str],
+        limit: int,
+        space_ids: tuple[str, ...] | None = None,
+    ) -> list[WikiPage]:
         if not terms:
             return []
-        statement = text("""
+        clauses = ["status = 'published'"]
+        parameters: dict[str, str | int] = {
+            "query": self._boolean_query(terms),
+            "limit": limit,
+        }
+        if space_ids is not None:
+            if not space_ids:
+                return []
+            placeholders = []
+            for index, space_id in enumerate(space_ids):
+                key = f"space_{index}"
+                placeholders.append(f":{key}")
+                parameters[key] = space_id
+            clauses.append(f"space_id IN ({','.join(placeholders)})")
+        statement = text(f"""
             SELECT id
             FROM wikipage
-            WHERE status = 'published'
+            WHERE {' AND '.join(clauses)}
               AND MATCH(title, content) AGAINST (:query IN BOOLEAN MODE)
             ORDER BY MATCH(title, content) AGAINST (:query IN BOOLEAN MODE) DESC
             LIMIT :limit
@@ -171,10 +191,7 @@ class KnowledgeSearch:
         with self.engine.connect() as connection:
             ids = [
                 str(row[0])
-                for row in connection.execute(
-                    statement,
-                    {"query": self._boolean_query(terms), "limit": limit},
-                ).all()
+                for row in connection.execute(statement, parameters).all()
             ]
         if not ids:
             return []
@@ -183,9 +200,14 @@ class KnowledgeSearch:
         by_id = {page.id: page for page in pages}
         return [by_id[page_id] for page_id in ids if page_id in by_id]
 
-    def _wiki_lexical_candidates(self, terms: list[str], limit: int) -> list[dict]:
+    def _wiki_lexical_candidates(
+        self,
+        terms: list[str],
+        limit: int,
+        space_ids: tuple[str, ...] | None = None,
+    ) -> list[dict]:
         candidates = []
-        for page in self._wiki_fulltext_pages(terms, limit):
+        for page in self._wiki_fulltext_pages(terms, limit, space_ids):
             sources = json.loads(page.sources_json or "[]")
             chunks = split_structured_blocks(
                 page.title,
@@ -230,6 +252,7 @@ class KnowledgeSearch:
         wanted: list[str],
         collection_ids: list[str] | tuple[str, ...] | None,
         limit: int,
+        space_ids: tuple[str, ...] | None = None,
     ) -> list[dict]:
         candidates: list[dict] = []
         if "document" in wanted:
@@ -242,7 +265,7 @@ class KnowledgeSearch:
                 )
         if "wiki" in wanted:
             for rank, candidate in enumerate(
-                self._wiki_lexical_candidates(terms, limit),
+                self._wiki_lexical_candidates(terms, limit, space_ids),
                 start=1,
             ):
                 candidates.append(
@@ -298,6 +321,7 @@ class KnowledgeSearch:
                         "source_type": "document",
                         "source_id": chunk.document_id,
                         "collection_id": chunk.collection_id,
+                        "space_id": chunk.space_id,
                         "title": chunk.title,
                         "section": chunk.section,
                         "page": chunk.page or 0,
@@ -330,6 +354,7 @@ class KnowledgeSearch:
                     "source_type": "wiki",
                     "source_id": page.id,
                     "collection_id": "",
+                    "space_id": page.space_id,
                     "title": page.title,
                     "section": chunk.section,
                     "page": 0,
@@ -371,12 +396,31 @@ class KnowledgeSearch:
         source_types: list[str] | None = None,
         collection_ids: list[str] | tuple[str, ...] | None = None,
         limit: int = 10,
+        authorization_scope: AuthorizationScope | None = None,
     ) -> list[dict]:
         context = self._context
         terms = self._terms(query)
         wanted = source_types or ["document", "wiki"]
+        scoped_collection_ids = collection_ids
+        scoped_space_ids: tuple[str, ...] | None = None
+        if authorization_scope is not None:
+            allowed_collections = set(authorization_scope.collection_ids)
+            if collection_ids:
+                allowed_collections.intersection_update(collection_ids)
+            scoped_collection_ids = tuple(sorted(allowed_collections))
+            scoped_space_ids = authorization_scope.space_ids
+            if not scoped_collection_ids:
+                wanted = [value for value in wanted if value != "document"]
+            if not scoped_space_ids:
+                wanted = [value for value in wanted if value != "wiki"]
+        if not wanted:
+            return []
         lexical = self._lexical_candidates(
-            terms, wanted, collection_ids, max(limit * 3, 20)
+            terms,
+            wanted,
+            scoped_collection_ids,
+            max(limit * 3, 20),
+            scoped_space_ids,
         )
         candidate_limit = max(limit * 3, 20)
         query_embedding = context.embedder.embed([query])[0]
@@ -389,10 +433,11 @@ class KnowledgeSearch:
                 [source_type],
                 candidate_limit,
                 (
-                    list(collection_ids)
-                    if source_type == "document" and collection_ids
+                    list(scoped_collection_ids)
+                    if source_type == "document" and scoped_collection_ids
                     else None
                 ),
+                list(scoped_space_ids) if scoped_space_ids else None,
             )
             lane = [
                 candidate
@@ -468,29 +513,46 @@ class KnowledgeSearch:
         return sum(haystack.count(term) for term in terms)
 
     def search_documents(
-        self, query: str, collection_ids: list[str] | tuple[str, ...] | None = None
+        self,
+        query: str,
+        collection_ids: list[str] | tuple[str, ...] | None = None,
+        authorization_scope: AuthorizationScope | None = None,
     ) -> list[dict]:
         results = self.search(
             query,
             source_types=["document"],
             collection_ids=collection_ids,
+            authorization_scope=authorization_scope,
         )
         return [
             {**item, "document_id": item["source_id"]}
             for item in results
         ]
 
-    def search_wiki(self, query: str) -> list[dict]:
-        return self.search(query, source_types=["wiki"])
+    def search_wiki(
+        self, query: str, authorization_scope: AuthorizationScope | None = None
+    ) -> list[dict]:
+        return self.search(
+            query,
+            source_types=["wiki"],
+            authorization_scope=authorization_scope,
+        )
 
-    def get_wiki_page(self, path: str) -> dict:
+    def get_wiki_page(
+        self, path: str, authorization_scope: AuthorizationScope | None = None
+    ) -> dict:
         with Session(self.engine) as session:
-            page = session.exec(
-                select(WikiPage).where(
-                    WikiPage.path == path,
-                    WikiPage.status == "published",
+            statement = select(WikiPage).where(
+                WikiPage.path == path,
+                WikiPage.status == "published",
+            )
+            if authorization_scope is not None:
+                if not authorization_scope.space_ids:
+                    raise FileNotFoundError(path)
+                statement = statement.where(
+                    col(WikiPage.space_id).in_(authorization_scope.space_ids)
                 )
-            ).first()
+            page = session.exec(statement).first()
         if page is None:
             raise FileNotFoundError(path)
         return {

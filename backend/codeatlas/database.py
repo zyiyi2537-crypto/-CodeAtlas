@@ -6,7 +6,14 @@ from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.pool import NullPool
 from sqlmodel import Session, SQLModel, col, create_engine, select
 
-from .models import ExternalSource, IndexJob
+from .models import (
+    DEFAULT_SPACE_ID,
+    DEFAULT_WORKSPACE_ID,
+    ExternalSource,
+    IndexJob,
+    KnowledgeSpace,
+    Workspace,
+)
 from .settings import Settings
 
 
@@ -31,6 +38,21 @@ def initialize_database(settings: Settings, engine) -> None:
     if settings.environment == "test":
         SQLModel.metadata.create_all(engine)
     with Session(engine) as session:
+        workspace = session.get(Workspace, DEFAULT_WORKSPACE_ID)
+        if workspace is None:
+            session.add(Workspace(id=DEFAULT_WORKSPACE_ID, name="CodeAtlas"))
+            session.flush()
+        if session.get(KnowledgeSpace, DEFAULT_SPACE_ID) is None:
+            session.add(
+                KnowledgeSpace(
+                    id=DEFAULT_SPACE_ID,
+                    workspace_id=DEFAULT_WORKSPACE_ID,
+                    name="Default",
+                    description="Default knowledge space",
+                    visibility="workspace",
+                )
+            )
+            session.flush()
         jobs = session.exec(select(IndexJob).where(IndexJob.status == "running")).all()
         for job in jobs:
             job.status = "queued"

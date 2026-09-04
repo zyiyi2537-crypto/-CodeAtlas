@@ -3,9 +3,16 @@ set -euo pipefail
 
 SOURCE_ROOT=${1:-/root/codeatlas-release}
 ENV_FILE=/etc/codeatlas/codeatlas.env
+REVISION_ENV_FILE=/etc/codeatlas/revision.env
 NGINX_TARGET=/etc/nginx/conf.d/codeatlas.conf
 NGINX_DEFAULT=/etc/nginx/conf.d/default.conf
 CODEATLAS_SERVICE=/etc/systemd/system/codeatlas.service
+BACKEND_TARGET=/opt/codeatlas/backend
+BACKEND_CANDIDATE=/opt/codeatlas/backend.next
+BACKEND_PREVIOUS=/opt/codeatlas/backend.previous
+WEB_TARGET=/var/www/codeatlas
+WEB_CANDIDATE=/var/www/codeatlas.next
+WEB_PREVIOUS=/var/www/codeatlas.previous
 PYTHON_BIN=${CODEATLAS_PYTHON_BIN:-python3.12}
 NGINX_CANDIDATE=""
 NGINX_PREFLIGHT=""
@@ -73,6 +80,14 @@ if [[ ${CODEATLAS_COOKIE_SECURE:-false} != true ]]; then
   echo "CODEATLAS_COOKIE_SECURE must be true in production" >&2
   exit 1
 fi
+BUILD_REVISION=${CODEATLAS_BUILD_REVISION:-manual}
+if [[ -f "$SOURCE_ROOT/REVISION" ]]; then
+  BUILD_REVISION=$(tr -d '\r\n' < "$SOURCE_ROOT/REVISION")
+fi
+if [[ ! "$BUILD_REVISION" =~ ^[A-Za-z0-9._-]{1,64}$ ]]; then
+  echo "Release revision must contain 1-64 safe identifier characters" >&2
+  exit 1
+fi
 CODEATLAS_DOMAIN=${CODEATLAS_PUBLIC_ORIGIN#https://}
 if [[ ! "$CODEATLAS_DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]]; then
   echo "CODEATLAS_PUBLIC_ORIGIN must contain only an HTTPS hostname without a path" >&2
@@ -120,6 +135,16 @@ content = re.sub(
     "",
     content,
     flags=re.MULTILINE,
+)
+if 'add_header Strict-Transport-Security "max-age=31536000" always;' not in content:
+    content = content.replace(
+        '    add_header X-Frame-Options "DENY" always;\n',
+        '    add_header X-Frame-Options "DENY" always;\n'
+        '    add_header Strict-Transport-Security "max-age=31536000" always;\n',
+    )
+content = content.replace(
+    '^/(assets|images|lab/code-kb/assets)/.+\\.[a-f0-9]{8,}',
+    '^/(_astro|assets|images|lab/code-kb/assets)/.+\\.[a-f0-9_-]{8,}',
 )
 target.write_text(content, encoding="utf-8")
 PY
@@ -211,25 +236,28 @@ if [[ "$MYSQL_CONFIG_CHANGED" == true ]]; then
   systemctl restart mysqld
 fi
 
-install -d -m 0755 /opt/codeatlas /var/www/codeatlas
+install -d -m 0755 /opt/codeatlas /var/www
 install -d -m 0755 /opt/codeatlas/blog/src/content
 install -d -o codeatlas -g codeatlas -m 0750 /var/lib/codeatlas
 
+rm -rf -- "$BACKEND_CANDIDATE" "$WEB_CANDIDATE"
+install -d -m 0755 "$BACKEND_CANDIDATE" "$WEB_CANDIDATE"
+
 rsync -a --delete \
   --exclude '.venv' --exclude 'data' --exclude '.pytest-tmp' \
-  "$SOURCE_ROOT/backend/" /opt/codeatlas/backend/
-rsync -a --delete "$SOURCE_ROOT/blog-dist/" /var/www/codeatlas/
+  "$SOURCE_ROOT/backend/" "$BACKEND_CANDIDATE/"
+rsync -a --delete "$SOURCE_ROOT/blog-dist/" "$WEB_CANDIDATE/"
 if [[ -d "$SOURCE_ROOT/blog-content" ]]; then
   rsync -a --delete "$SOURCE_ROOT/blog-content/" /opt/codeatlas/blog/src/content/
 fi
-install -d -m 0755 /var/www/codeatlas/lab/code-kb
-rsync -a --delete "$SOURCE_ROOT/frontend-dist/" /var/www/codeatlas/lab/code-kb/
+install -d -m 0755 "$WEB_CANDIDATE/lab/code-kb"
+rsync -a --delete "$SOURCE_ROOT/frontend-dist/" "$WEB_CANDIDATE/lab/code-kb/"
 
-"$PYTHON_BIN" -m venv /opt/codeatlas/backend/.venv
-/opt/codeatlas/backend/.venv/bin/pip install --upgrade pip wheel
-/opt/codeatlas/backend/.venv/bin/pip install /opt/codeatlas/backend
+"$PYTHON_BIN" -m venv "$BACKEND_CANDIDATE/.venv"
+"$BACKEND_CANDIDATE/.venv/bin/pip" install --upgrade pip wheel
+"$BACKEND_CANDIDATE/.venv/bin/pip" install "$BACKEND_CANDIDATE"
 (
-  cd /opt/codeatlas/backend
+  cd "$BACKEND_CANDIDATE"
   .venv/bin/python -m alembic -c alembic.ini upgrade head
 )
 
@@ -238,6 +266,7 @@ NGINX_BACKUP_DIR=$(mktemp -d /var/backups/codeatlas/nginx-install-XXXXXXXX)
 NGINX_TARGET_EXISTED=false
 NGINX_DEFAULT_EXISTED=false
 CODEATLAS_SERVICE_EXISTED=false
+REVISION_ENV_EXISTED=false
 if [[ -f "$NGINX_TARGET" ]]; then
   install -m 0644 "$NGINX_TARGET" "$NGINX_BACKUP_DIR/codeatlas.conf"
   NGINX_TARGET_EXISTED=true
@@ -250,6 +279,14 @@ if [[ -f "$CODEATLAS_SERVICE" ]]; then
   install -m 0644 "$CODEATLAS_SERVICE" "$NGINX_BACKUP_DIR/codeatlas.service"
   CODEATLAS_SERVICE_EXISTED=true
 fi
+if [[ -f "$REVISION_ENV_FILE" ]]; then
+  install -m 0640 "$REVISION_ENV_FILE" "$NGINX_BACKUP_DIR/revision.env"
+  REVISION_ENV_EXISTED=true
+fi
+
+printf 'CODEATLAS_BUILD_REVISION=%s\n' "$BUILD_REVISION" > "$REVISION_ENV_FILE"
+chown root:codeatlas "$REVISION_ENV_FILE"
+chmod 0640 "$REVISION_ENV_FILE"
 
 verify_active_state() {
   local unit=$1
@@ -304,12 +341,69 @@ restore_nginx_files() {
       failed=1
     fi
   fi
+  if [[ "$REVISION_ENV_EXISTED" == true ]]; then
+    if ! install -m 0640 -o root -g codeatlas \
+      "$NGINX_BACKUP_DIR/revision.env" "$REVISION_ENV_FILE"; then
+      failed=1
+    fi
+  else
+    if ! rm -f -- "$REVISION_ENV_FILE"; then
+      failed=1
+    fi
+  fi
+  return "$failed"
+}
+
+BACKEND_TARGET_EXISTED=false
+WEB_TARGET_EXISTED=false
+BACKEND_SWITCHED=false
+WEB_SWITCHED=false
+
+switch_release() {
+  rm -rf -- "$BACKEND_PREVIOUS" "$WEB_PREVIOUS"
+  if [[ -e "$BACKEND_TARGET" || -L "$BACKEND_TARGET" ]]; then
+    mv -- "$BACKEND_TARGET" "$BACKEND_PREVIOUS" || return 1
+    BACKEND_TARGET_EXISTED=true
+  fi
+  BACKEND_SWITCHED=true
+  mv -- "$BACKEND_CANDIDATE" "$BACKEND_TARGET" || return 1
+  if [[ -e "$WEB_TARGET" || -L "$WEB_TARGET" ]]; then
+    mv -- "$WEB_TARGET" "$WEB_PREVIOUS" || return 1
+    WEB_TARGET_EXISTED=true
+  fi
+  WEB_SWITCHED=true
+  mv -- "$WEB_CANDIDATE" "$WEB_TARGET" || return 1
+}
+
+restore_release() {
+  local failed=0
+  if [[ "$BACKEND_SWITCHED" == true ]]; then
+    rm -rf -- "$BACKEND_CANDIDATE.failed"
+    if [[ -e "$BACKEND_TARGET" || -L "$BACKEND_TARGET" ]]; then
+      if ! mv -- "$BACKEND_TARGET" "$BACKEND_CANDIDATE.failed"; then failed=1; fi
+    fi
+    if [[ "$BACKEND_TARGET_EXISTED" == true ]]; then
+      if ! mv -- "$BACKEND_PREVIOUS" "$BACKEND_TARGET"; then failed=1; fi
+    fi
+  fi
+  if [[ "$WEB_SWITCHED" == true ]]; then
+    rm -rf -- "$WEB_CANDIDATE.failed"
+    if [[ -e "$WEB_TARGET" || -L "$WEB_TARGET" ]]; then
+      if ! mv -- "$WEB_TARGET" "$WEB_CANDIDATE.failed"; then failed=1; fi
+    fi
+    if [[ "$WEB_TARGET_EXISTED" == true ]]; then
+      if ! mv -- "$WEB_PREVIOUS" "$WEB_TARGET"; then failed=1; fi
+    fi
+  fi
   return "$failed"
 }
 
 rollback_nginx() {
   local failed=0
   local current_codeatlas_load=""
+  if ! restore_release; then
+    failed=1
+  fi
   if [[ "$CODEATLAS_ENABLED_STATE" == absent && \
         ( -e "$CODEATLAS_SERVICE" || -L "$CODEATLAS_SERVICE" ) ]]; then
     current_codeatlas_load=$(capture_load_state codeatlas) || current_codeatlas_load=error
@@ -377,6 +471,7 @@ install -m 0644 "$NGINX_CANDIDATE" "$NGINX_TARGET" \
   || fail_nginx_switch "Nginx candidate installation failed"
 rm -f -- "$NGINX_DEFAULT" || fail_nginx_switch "Default Nginx removal failed"
 nginx -t || fail_nginx_switch "Nginx candidate validation failed"
+switch_release || fail_nginx_switch "Release switch failed"
 
 systemctl daemon-reload || fail_nginx_switch "systemd daemon reload failed"
 systemctl enable nginx codeatlas || fail_nginx_switch "Service enable failed"

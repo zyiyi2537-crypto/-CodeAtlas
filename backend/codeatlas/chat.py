@@ -6,6 +6,7 @@ import json
 
 import httpx
 
+from .authorization import AuthorizationScope
 from .models import User
 from .retrieval import CodeRetriever
 from .settings import Settings
@@ -58,6 +59,7 @@ class ChatService:
         repository_ids: list[str] | None = None,
         history: list[dict] | None = None,
         memories: list[str] | None = None,
+        authorization_scope: AuthorizationScope | None = None,
     ) -> dict:
         if not self.enabled:
             raise ChatUnavailableError("chat provider is not configured")
@@ -71,6 +73,7 @@ class ChatService:
             repository_ids=repository_ids,
             source_types=["code", "document", "wiki"],
             limit=8,
+            authorization_scope=authorization_scope,
         )
         messages = self._build_messages(
             question,

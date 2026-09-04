@@ -19,6 +19,7 @@ from .member_lifecycle_lock import member_lifecycle_lock
 from .models import (
     Document,
     DocumentChunkRecord,
+    DocumentCollection,
     ExternalSource,
     ExternalSourceItem,
     utc_now,
@@ -260,6 +261,9 @@ class ExternalSourceSyncService:
             ).first()
             if stored_source is None:
                 raise LookupError(source["id"])
+            collection = session.get(DocumentCollection, stored_source.collection_id)
+            if collection is None:
+                raise LookupError(stored_source.collection_id)
             existing_mapping = (
                 session.get(ExternalSourceItem, mapping.id) if mapping else None
             )
@@ -319,6 +323,7 @@ class ExternalSourceSyncService:
                 document.id,
                 source["collection_id"],
                 blocks=blocks,
+                space_id=collection.space_id,
             )
             session.add(document)
             session.add_all(chunks)

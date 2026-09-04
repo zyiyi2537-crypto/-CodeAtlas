@@ -11,6 +11,7 @@ export interface User {
 
 export interface Repository {
   id: string
+  space_id: string
   name: string
   description: string
   git_url: string
@@ -101,10 +102,45 @@ export interface ApiToken {
   prefix: string
   scopes: string[]
   repository_ids: string[]
+  space_ids: string[]
   created_at: string
   expires_at: string | null
   revoked_at: string | null
   token?: string
+}
+
+export interface KnowledgeSpace {
+  id: string
+  workspace_id: string
+  name: string
+  description: string
+  visibility: 'workspace' | 'restricted'
+  role: 'manager' | 'editor' | 'viewer'
+}
+
+export interface ConventionCitation {
+  repository_id: string
+  commit: string
+  path: string
+  symbol: string
+  start_line: number
+  end_line: number
+}
+
+export interface CompanyConvention {
+  id: string
+  space_id: string
+  title: string
+  category: string
+  language: string
+  framework: string
+  task: string
+  rule: string
+  prohibited_pattern: string
+  examples: string[]
+  citations: ConventionCitation[]
+  status: 'draft' | 'inferred' | 'confirmed' | 'deprecated'
+  updated_at: string
 }
 
 export interface SearchResult {

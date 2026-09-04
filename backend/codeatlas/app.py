@@ -146,7 +146,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/v1/health")
     def health():
-        return {"status": "ok", "service": "codeatlas", "version": "0.1.0"}
+        return {
+            "status": "ok",
+            "service": "codeatlas",
+            "version": "0.1.0",
+            "revision": settings.build_revision,
+        }
 
     @app.get("/api/v1/ready")
     def ready():

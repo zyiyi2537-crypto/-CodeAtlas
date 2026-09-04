@@ -8,6 +8,7 @@ from typing import Any, cast
 from sqlalchemy import text
 from sqlmodel import Session, col, select
 
+from .authorization import AuthorizationScope
 from .chunker import read_text
 from .embeddings import EmbeddingClient, settings_for_profile
 from .models import EmbeddingProfile, Repository, RepositoryAccess, User
@@ -39,6 +40,7 @@ class CodeRetriever:
         self,
         user: User | None,
         scope_repository_ids: tuple[str, ...] | None = None,
+        authorization_scope: AuthorizationScope | None = None,
     ) -> list[Repository]:
         with Session(self.engine) as session:
             searchable = (
@@ -48,14 +50,19 @@ class CodeRetriever:
                     & col(Repository.active_generation_id).is_not(None)
                 )
             )
-            if scope_repository_ids is not None:
-                if not scope_repository_ids:
+            resolved_repository_ids = (
+                authorization_scope.repository_ids
+                if authorization_scope is not None
+                else scope_repository_ids
+            )
+            if resolved_repository_ids is not None:
+                if not resolved_repository_ids:
                     return []
                 return list(
                     session.exec(
                         select(Repository).where(
                             searchable,
-                            col(Repository.id).in_(scope_repository_ids),
+                            col(Repository.id).in_(resolved_repository_ids),
                         )
                     )
                 )
@@ -89,11 +96,14 @@ class CodeRetriever:
         path_prefix: str = "",
         limit: int = 10,
         scope_repository_ids: tuple[str, ...] | None = None,
+        authorization_scope: AuthorizationScope | None = None,
     ) -> list[dict]:
         query = query.strip()
         if not query or len(query) > 500:
             raise ValueError("query must contain between 1 and 500 characters")
-        repositories = self.allowed_repositories(user, scope_repository_ids)
+        repositories = self.allowed_repositories(
+            user, scope_repository_ids, authorization_scope
+        )
         if repository_ids:
             wanted = set(repository_ids)
             repositories = [repo for repo in repositories if repo.id in wanted]
@@ -112,8 +122,11 @@ class CodeRetriever:
             EmbeddingClient(embedding_settings).embed([query])[0],
             generation_ids,
             candidate_limit,
+            languages,
         )
-        lexical = self._lexical_candidates(query, generation_ids, candidate_limit)
+        lexical = self._lexical_candidates(
+            query, generation_ids, candidate_limit, languages, path_prefix
+        )
         allowed_languages = {value.lower() for value in (languages or [])}
 
         def matches(candidate: dict) -> bool:
@@ -137,6 +150,7 @@ class CodeRetriever:
         query_embedding: list[float],
         generation_ids: list[str],
         candidate_limit: int,
+        languages: list[str] | None = None,
     ) -> list[dict]:
         profile_store = VectorStore(embedding_settings, namespace=profile_namespace)
         self.vector_store = profile_store
@@ -150,7 +164,12 @@ class CodeRetriever:
                 candidates.extend(
                     VectorStore(
                         embedding_settings, namespace=generation_namespace
-                    ).search(query_embedding, [generation_id], candidate_limit)
+                    ).search(
+                        query_embedding,
+                        [generation_id],
+                        candidate_limit,
+                        languages=languages,
+                    )
                 )
             else:
                 legacy_generation_ids.append(generation_id)
@@ -160,6 +179,7 @@ class CodeRetriever:
                     query_embedding,
                     legacy_generation_ids,
                     candidate_limit,
+                    languages=languages,
                 )
             )
         return sorted(
@@ -220,6 +240,7 @@ class CodeRetriever:
         collection_ids: list[str] | None = None,
         source_types: list[str] | None = None,
         limit: int = 10,
+        authorization_scope: AuthorizationScope | None = None,
     ) -> list[dict]:
         wanted = source_types or ["code", "document", "wiki"]
         code_results = (
@@ -228,6 +249,7 @@ class CodeRetriever:
                 user,
                 repository_ids=repository_ids,
                 limit=limit,
+                authorization_scope=authorization_scope,
             )
             if "code" in wanted
             else []
@@ -243,6 +265,7 @@ class CodeRetriever:
                 source_types=knowledge_types,
                 collection_ids=collection_ids,
                 limit=limit,
+                authorization_scope=authorization_scope,
             )
         else:
             knowledge_results = []
@@ -263,28 +286,45 @@ class CodeRetriever:
         )
 
     def _lexical_candidates(
-        self, query: str, generation_ids: list[str], limit: int
+        self,
+        query: str,
+        generation_ids: list[str],
+        limit: int,
+        languages: list[str] | None = None,
+        path_prefix: str = "",
     ) -> list[dict]:
         terms = [token for token in tokenize(query) if len(token) > 1][:12]
         if not terms:
             return []
         boolean_query = " ".join(f'"{term.replace(chr(34), "")}"' for term in terms)
         placeholders = ",".join(f":generation_{index}" for index in range(len(generation_ids)))
+        parameters: dict[str, str | int] = {
+            f"generation_{index}": value
+            for index, value in enumerate(generation_ids)
+        }
+        clauses = [f"c.generation_id IN ({placeholders})"]
+        allowed_languages = sorted({value.lower() for value in (languages or [])})
+        if allowed_languages:
+            language_placeholders = []
+            for index, language in enumerate(allowed_languages):
+                key = f"language_{index}"
+                language_placeholders.append(f":{key}")
+                parameters[key] = language
+            clauses.append(f"c.language IN ({','.join(language_placeholders)})")
+        if path_prefix:
+            clauses.append("c.path LIKE :path_prefix")
+            parameters["path_prefix"] = f"{path_prefix}%"
         statement = text(f"""
             SELECT c.*,
                    MATCH(c.path, c.symbol, c.content)
                    AGAINST (:query IN BOOLEAN MODE) AS lexical_rank
             FROM codechunkrecord c
-            WHERE c.generation_id IN ({placeholders})
+            WHERE {' AND '.join(clauses)}
               AND MATCH(c.path, c.symbol, c.content)
                   AGAINST (:query IN BOOLEAN MODE)
             ORDER BY lexical_rank DESC
             LIMIT :limit
         """)
-        parameters: dict[str, str | int] = {
-            f"generation_{index}": value
-            for index, value in enumerate(generation_ids)
-        }
         parameters.update({"query": boolean_query, "limit": limit})
         with self.engine.connect() as connection:
             rows = connection.execute(statement, parameters).mappings().all()
@@ -308,10 +348,13 @@ class CodeRetriever:
         self, repository_id: str, relative_path: str, user: User | None,
         start_line: int = 1, end_line: int = 200,
         scope_repository_ids: tuple[str, ...] | None = None,
+        authorization_scope: AuthorizationScope | None = None,
     ) -> dict:
         repositories = {
             repo.id: repo
-            for repo in self.allowed_repositories(user, scope_repository_ids)
+            for repo in self.allowed_repositories(
+                user, scope_repository_ids, authorization_scope
+            )
         }
         if repository_id not in repositories:
             raise PermissionError("repository is not accessible")
@@ -332,10 +375,13 @@ class CodeRetriever:
         self, pattern: str, user: User | None, repository_id: str | None = None,
         limit: int = 20, regex: bool = False,
         scope_repository_ids: tuple[str, ...] | None = None,
+        authorization_scope: AuthorizationScope | None = None,
     ) -> list[dict]:
         if not pattern.strip() or len(pattern) > 200:
             raise ValueError("pattern must contain between 1 and 200 characters")
-        repositories = self.allowed_repositories(user, scope_repository_ids)
+        repositories = self.allowed_repositories(
+            user, scope_repository_ids, authorization_scope
+        )
         if repository_id:
             repositories = [repo for repo in repositories if repo.id == repository_id]
         matches = []

@@ -17,6 +17,7 @@ import chromadb
 
 from .chunker import CodeChunk
 from .embeddings import EmbeddingClient
+from .models import DEFAULT_SPACE_ID
 from .settings import Settings
 
 
@@ -126,7 +127,11 @@ class VectorStore:
             self.client.delete_collection(name)
 
     def add_generation(
-        self, chunks: list[CodeChunk], embedder: EmbeddingClient, batch_size: int = 32
+        self,
+        chunks: list[CodeChunk],
+        embedder: EmbeddingClient,
+        batch_size: int = 32,
+        space_id: str = DEFAULT_SPACE_ID,
     ) -> None:
         for offset in range(0, len(chunks), batch_size):
             batch = chunks[offset : offset + batch_size]
@@ -139,6 +144,7 @@ class VectorStore:
                     "source_type": "code",
                     "source_id": chunk.repository_id,
                     "collection_id": "",
+                    "space_id": space_id,
                     "repo": chunk.repository_id,
                     "generation_id": chunk.generation_id,
                     "commit": chunk.commit,
@@ -178,6 +184,7 @@ class VectorStore:
         source_types: list[str],
         limit: int,
         collection_ids: list[str] | None = None,
+        space_ids: list[str] | None = None,
     ) -> list[dict]:
         if not source_types or not self.collection.count():
             return []
@@ -191,6 +198,12 @@ class VectorStore:
                 {"collection_id": collection_ids[0]}
                 if len(collection_ids) == 1
                 else {"collection_id": {"$in": collection_ids}}
+            )
+        if space_ids:
+            clauses.append(
+                {"space_id": space_ids[0]}
+                if len(space_ids) == 1
+                else {"space_id": {"$in": space_ids}}
             )
         where = clauses[0] if len(clauses) == 1 else {"$and": clauses}
         result = self.collection.query(
@@ -233,14 +246,28 @@ class VectorStore:
         query_embedding: list[float],
         generation_ids: list[str],
         candidate_limit: int,
+        languages: list[str] | None = None,
     ) -> list[dict]:
         if not generation_ids or not self.collection.count():
             return []
-        where = (
+        generation_filter = (
             {"generation_id": generation_ids[0]}
             if len(generation_ids) == 1
             else {"generation_id": {"$in": generation_ids}}
         )
+        normalized_languages = sorted(
+            {language.lower() for language in (languages or [])}
+        )
+        where: dict[str, Any]
+        if normalized_languages:
+            language_filter = (
+                {"language": normalized_languages[0]}
+                if len(normalized_languages) == 1
+                else {"language": {"$in": normalized_languages}}
+            )
+            where = {"$and": [generation_filter, language_filter]}
+        else:
+            where = generation_filter
         result = self.collection.query(
             query_embeddings=cast(Any, [query_embedding]),
             n_results=min(candidate_limit, self.collection.count()),

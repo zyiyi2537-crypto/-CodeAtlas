@@ -27,6 +27,7 @@ from .auth import (
     require_identity,
     resolve_identity,
 )
+from .authorization import AuthorizationScope, resolve_authorization_scope
 from .chat import ChatService, ChatUnavailableError
 from .chat_session_lock import (
     ChatSessionLockError,
@@ -34,6 +35,7 @@ from .chat_session_lock import (
     release_chat_session_lock,
 )
 from .connectors import credential_environment_name, validate_public_https_base_url
+from .conventions import find_company_conventions, serialize_convention
 from .credential_crypto import CredentialEncryptionError, encrypt_secret
 from .documents import chunk_document, extract_structured_blocks
 from .embedding_profile_lock import (
@@ -71,11 +73,13 @@ from .llm_config import (
 from .llm_provider_lock import LlmProviderLockError, llm_provider_lock
 from .member_lifecycle_lock import MemberLifecycleLockError, member_lifecycle_lock
 from .models import (
+    DEFAULT_SPACE_ID,
     ApiToken,
     AuditEvent,
     ChatMessage,
     ChatSession,
     CodeChunkRecord,
+    CompanyConvention,
     Document,
     DocumentChunkRecord,
     DocumentCollection,
@@ -84,6 +88,7 @@ from .models import (
     GitHubSource,
     GitLabSource,
     IndexJob,
+    KnowledgeSpace,
     LlmProvider,
     Repository,
     RepositoryAccess,
@@ -249,9 +254,10 @@ class RepositoryCreate(BaseModel):
     description: str = Field(default="", max_length=500)
     git_url: str
     branch: str = Field(default="main", max_length=200)
-    visibility: str = "public"
+    visibility: str = "private"
     license_name: str = Field(default="", max_length=100)
     license_url: str = Field(default="", max_length=1000)
+    space_id: str = Field(default=DEFAULT_SPACE_ID, max_length=32)
 
 
 class GitLabSourceCreate(BaseModel):
@@ -280,6 +286,7 @@ class GitHubSourceCreate(BaseModel):
 class DocumentCollectionCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=500)
+    space_id: str = Field(default=DEFAULT_SPACE_ID, max_length=32)
 
 
 class ExternalSourceCreate(BaseModel):
@@ -311,10 +318,47 @@ class WikiPageCreate(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     content: str = Field(min_length=1)
     sources: list[str] = Field(min_length=1, max_length=50)
+    space_id: str = Field(default=DEFAULT_SPACE_ID, max_length=32)
 
 
 class WikiSearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=500)
+
+
+class ConventionCitation(BaseModel):
+    repository_id: str = Field(min_length=1, max_length=32)
+    commit: str = Field(min_length=1, max_length=64)
+    path: str = Field(min_length=1, max_length=1000)
+    symbol: str = Field(default="", max_length=500)
+    start_line: int = Field(ge=1)
+    end_line: int = Field(ge=1)
+
+
+class CompanyConventionCreate(BaseModel):
+    space_id: str = Field(default=DEFAULT_SPACE_ID, max_length=32)
+    title: str = Field(min_length=1, max_length=200)
+    category: str = Field(min_length=1, max_length=50)
+    language: str = Field(default="", max_length=50)
+    framework: str = Field(default="", max_length=100)
+    task: str = Field(default="", max_length=200)
+    rule: str = Field(min_length=1, max_length=5000)
+    prohibited_pattern: str = Field(default="", max_length=5000)
+    examples: list[str] = Field(default_factory=list, max_length=20)
+    citations: list[ConventionCitation] = Field(min_length=1, max_length=20)
+    status: str = "draft"
+
+
+class CompanyConventionUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    category: str | None = Field(default=None, min_length=1, max_length=50)
+    language: str | None = Field(default=None, max_length=50)
+    framework: str | None = Field(default=None, max_length=100)
+    task: str | None = Field(default=None, max_length=200)
+    rule: str | None = Field(default=None, min_length=1, max_length=5000)
+    prohibited_pattern: str | None = Field(default=None, max_length=5000)
+    examples: list[str] | None = Field(default=None, max_length=20)
+    citations: list[ConventionCitation] | None = Field(default=None, min_length=1, max_length=20)
+    status: str | None = None
 
 
 class EmbeddingProfileCreate(BaseModel):
@@ -417,6 +461,7 @@ class TokenCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     scopes: list[str] = Field(default_factory=lambda: ["search", "read", "status"])
     repository_ids: list[str] = Field(default_factory=list, max_length=50)
+    space_ids: list[str] = Field(default_factory=list, max_length=20)
     expires_in_days: int | None = Field(default=None, ge=1, le=365)
 
 
@@ -512,9 +557,98 @@ def database(request: Request) -> Session:
     return Session(request.app.state.engine)
 
 
+def authorization_scope(
+    request: Request,
+    session: Session,
+    user: User | None,
+    *,
+    allow_anonymous: bool = False,
+) -> AuthorizationScope:
+    return resolve_authorization_scope(
+        session,
+        user,
+        allow_anonymous_repositories=(
+            allow_anonymous and request.app.state.settings.allow_anonymous_search
+        ),
+    )
+
+
+def require_space(
+    session: Session,
+    scope: AuthorizationScope,
+    space_id: str,
+    action: str = "read",
+) -> KnowledgeSpace:
+    space = session.get(KnowledgeSpace, space_id)
+    if space is None or not scope.permits_space(space.id, action):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Knowledge space is not accessible")
+    return space
+
+
+def validate_convention_status(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized not in {"draft", "inferred", "confirmed", "deprecated"}:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "Invalid company convention status",
+        )
+    return normalized
+
+
+def validate_convention_citations(
+    request: Request,
+    session: Session,
+    scope: AuthorizationScope,
+    space_id: str,
+    citations: list[ConventionCitation],
+) -> list[dict]:
+    normalized: list[dict] = []
+    for citation in citations:
+        if citation.end_line < citation.start_line:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "Citation end_line must not precede start_line",
+            )
+        repository = session.get(Repository, citation.repository_id)
+        if (
+            repository is None
+            or repository.space_id != space_id
+            or repository.id not in scope.repository_ids
+            or not repository.last_commit
+            or repository.last_commit != citation.commit
+        ):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "Convention citation must reference an accessible current repository commit",
+            )
+        try:
+            preview = request.app.state.retriever.get_file(
+                repository.id,
+                citation.path,
+                None,
+                citation.start_line,
+                citation.end_line,
+                authorization_scope=scope,
+            )
+            if (
+                not preview.get("content")
+                or preview.get("start_line") != citation.start_line
+                or preview.get("end_line") != citation.end_line
+            ):
+                raise ValueError("Citation line range is incomplete")
+        except (FileNotFoundError, PermissionError, ValueError) as exc:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "Convention citation does not resolve to an accessible source range",
+            ) from exc
+        normalized.append(citation.model_dump())
+    return normalized
+
+
 def serialize_repository(repo: Repository) -> dict:
     return {
         "id": repo.id, "name": repo.name, "description": repo.description,
+        "space_id": repo.space_id,
         "git_url": repo.git_url, "branch": repo.branch, "visibility": repo.visibility,
         "license_name": repo.license_name, "license_url": repo.license_url,
         "status": repo.status, "chunk_count": repo.chunk_count,
@@ -833,24 +967,44 @@ def create_document_collection(payload: DocumentCollectionCreate, request: Reque
     with database(request) as session:
         identity = require_admin(request, session)
         require_csrf(request, identity)
+        scope = authorization_scope(request, session, identity.user)
+        require_space(session, scope, payload.space_id, "manage")
         collection = DocumentCollection(
             name=payload.name.strip(),
             description=payload.description,
+            space_id=payload.space_id,
             created_by=identity.user.id,
         )
         session.add(collection)
         session.commit()
         session.refresh(collection)
-        return {"id": collection.id, "name": collection.name, "description": collection.description}
+        return {
+            "id": collection.id,
+            "name": collection.name,
+            "description": collection.description,
+            "space_id": collection.space_id,
+        }
 
 
 @router.get("/document-collections")
 def list_document_collections(request: Request):
     with database(request) as session:
-        require_identity(request, session)
-        statement = select(DocumentCollection).order_by(col(DocumentCollection.created_at).desc())
+        identity = require_identity(request, session)
+        scope = authorization_scope(request, session, identity.user)
+        if not scope.collection_ids:
+            return []
+        statement = (
+            select(DocumentCollection)
+            .where(col(DocumentCollection.id).in_(scope.collection_ids))
+            .order_by(col(DocumentCollection.created_at).desc())
+        )
         return [
-            {"id": item.id, "name": item.name, "description": item.description}
+            {
+                "id": item.id,
+                "name": item.name,
+                "description": item.description,
+                "space_id": item.space_id,
+            }
             for item in session.exec(statement).all()
         ]
 
@@ -947,7 +1101,10 @@ def delete_external_source(source_id: str, request: Request):
 @router.get("/document-collections/{collection_id}/documents")
 def list_documents(collection_id: str, request: Request):
     with database(request) as session:
-        require_identity(request, session)
+        identity = require_identity(request, session)
+        scope = authorization_scope(request, session, identity.user)
+        if not scope.permits_collection(collection_id):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Collection is not accessible")
         statement = select(Document).where(Document.collection_id == collection_id).order_by(
             col(Document.created_at).desc()
         )
@@ -974,9 +1131,11 @@ async def upload_document(collection_id: str, request: Request):
     with database(request) as session:
         identity = require_admin(request, session)
         require_csrf(request, identity)
+        scope = authorization_scope(request, session, identity.user)
         collection = session.get(DocumentCollection, collection_id)
-        if not collection:
+        if not collection or not scope.permits_collection(collection_id):
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Document collection not found")
+        require_space(session, scope, collection.space_id, "manage")
         form = await request.form()
         upload = form.get("file")
         if upload is None or not hasattr(upload, "read") or not hasattr(upload, "filename"):
@@ -1015,6 +1174,7 @@ async def upload_document(collection_id: str, request: Request):
             document.id,
             collection.id,
             blocks=blocks,
+            space_id=collection.space_id,
         )
         session.add(document)
         session.add_all(chunks)
@@ -1042,9 +1202,10 @@ async def upload_document(collection_id: str, request: Request):
 @router.post("/documents/search")
 def search_documents(payload: DocumentSearchRequest, request: Request):
     with database(request) as session:
-        require_identity(request, session)
+        identity = require_identity(request, session)
+        scope = authorization_scope(request, session, identity.user)
     return request.app.state.knowledge_search.search_documents(
-        payload.query, payload.collection_ids
+        payload.query, payload.collection_ids, scope
     )
 
 
@@ -1052,6 +1213,7 @@ def search_documents(payload: DocumentSearchRequest, request: Request):
 def search_knowledge(payload: KnowledgeSearchRequest, request: Request):
     with database(request) as session:
         identity = require_identity(request, session)
+        scope = authorization_scope(request, session, identity.user)
     allowed = {"code", "document", "wiki"}
     if not payload.source_types or not set(payload.source_types).issubset(allowed):
         raise HTTPException(
@@ -1064,6 +1226,7 @@ def search_knowledge(payload: KnowledgeSearchRequest, request: Request):
         repository_ids=payload.repository_ids,
         collection_ids=payload.collection_ids,
         source_types=payload.source_types,
+        authorization_scope=scope,
     )
 
 
@@ -1072,7 +1235,10 @@ def create_wiki_page(payload: WikiPageCreate, request: Request):
     with database(request) as session:
         identity = require_admin(request, session)
         require_csrf(request, identity)
+        scope = authorization_scope(request, session, identity.user)
+        require_space(session, scope, payload.space_id, "manage")
         page = WikiPage(
+            space_id=payload.space_id,
             path=payload.path.strip().lstrip("/"),
             title=payload.title.strip(),
             content=payload.content,
@@ -1084,7 +1250,12 @@ def create_wiki_page(payload: WikiPageCreate, request: Request):
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_CONTENT, "Wiki path must end with .md"
             )
-        if session.exec(select(WikiPage).where(WikiPage.path == page.path)).first():
+        if session.exec(
+            select(WikiPage).where(
+                WikiPage.space_id == page.space_id,
+                WikiPage.path == page.path,
+            )
+        ).first():
             raise HTTPException(status.HTTP_409_CONFLICT, "Wiki page already exists")
         session.add(page)
         session.commit()
@@ -1098,6 +1269,7 @@ def create_wiki_page(payload: WikiPageCreate, request: Request):
             ) from exc
         return {
             "id": page.id,
+            "space_id": page.space_id,
             "path": page.path,
             "title": page.title,
             "content": page.content,
@@ -1109,8 +1281,171 @@ def create_wiki_page(payload: WikiPageCreate, request: Request):
 @router.post("/wiki/search")
 def search_wiki(payload: WikiSearchRequest, request: Request):
     with database(request) as session:
-        require_identity(request, session)
-    return request.app.state.knowledge_search.search_wiki(payload.query)
+        identity = require_identity(request, session)
+        scope = authorization_scope(request, session, identity.user)
+    return request.app.state.knowledge_search.search_wiki(payload.query, scope)
+
+
+@router.get("/spaces")
+def list_spaces(request: Request):
+    with database(request) as session:
+        identity = require_identity(request, session)
+        scope = authorization_scope(request, session, identity.user)
+        if not scope.space_ids:
+            return []
+        spaces = session.exec(
+            select(KnowledgeSpace)
+            .where(col(KnowledgeSpace.id).in_(scope.space_ids))
+            .order_by(col(KnowledgeSpace.created_at))
+        ).all()
+        roles = dict(scope.space_roles)
+        return [
+            {
+                "id": space.id,
+                "workspace_id": space.workspace_id,
+                "name": space.name,
+                "description": space.description,
+                "visibility": space.visibility,
+                "role": roles.get(space.id, "viewer"),
+            }
+            for space in spaces
+        ]
+
+
+@router.get("/company-conventions")
+def list_company_conventions(
+    request: Request,
+    language: str = Query(default="", max_length=50),
+    framework: str = Query(default="", max_length=100),
+    task: str = Query(default="", max_length=200),
+    space_id: str | None = Query(default=None, max_length=32),
+):
+    with database(request) as session:
+        identity = require_identity(request, session)
+        scope = authorization_scope(request, session, identity.user)
+        if space_id:
+            require_space(session, scope, space_id)
+            scope = AuthorizationScope(
+                actor_user_id=scope.actor_user_id,
+                space_ids=(space_id,),
+                repository_ids=scope.repository_ids,
+                collection_ids=scope.collection_ids,
+                actions=scope.actions,
+                space_roles=scope.space_roles,
+                repository_spaces=scope.repository_spaces,
+                collection_spaces=scope.collection_spaces,
+            )
+        return find_company_conventions(
+            session,
+            scope,
+            language=language,
+            framework=framework,
+            task=task,
+            include_unconfirmed=is_admin_role(identity.user.role),
+        )
+
+
+@router.post("/company-conventions", status_code=201)
+def create_company_convention(
+    payload: CompanyConventionCreate, request: Request
+):
+    with database(request) as session:
+        identity = require_admin(request, session)
+        require_csrf(request, identity)
+        scope = authorization_scope(request, session, identity.user)
+        require_space(session, scope, payload.space_id, "manage")
+        convention = CompanyConvention(
+            space_id=payload.space_id,
+            title=payload.title.strip(),
+            category=payload.category.strip().lower(),
+            language=payload.language.strip().lower(),
+            framework=payload.framework.strip().lower(),
+            task=payload.task.strip(),
+            rule=payload.rule.strip(),
+            prohibited_pattern=payload.prohibited_pattern.strip(),
+            examples_json=json.dumps(payload.examples, ensure_ascii=False),
+            citations_json=json.dumps(
+                validate_convention_citations(
+                    request, session, scope, payload.space_id, payload.citations
+                ),
+                ensure_ascii=False,
+            ),
+            status=validate_convention_status(payload.status),
+            created_by=identity.user.id,
+        )
+        session.add(convention)
+        audit(
+            session,
+            "company_convention.create",
+            "company_convention",
+            convention.id,
+            identity.user.id,
+        )
+        session.commit()
+        session.refresh(convention)
+        return serialize_convention(convention)
+
+
+@router.patch("/company-conventions/{convention_id}")
+def update_company_convention(
+    convention_id: str,
+    payload: CompanyConventionUpdate,
+    request: Request,
+):
+    with database(request) as session:
+        identity = require_admin(request, session)
+        require_csrf(request, identity)
+        scope = authorization_scope(request, session, identity.user)
+        convention = session.get(CompanyConvention, convention_id)
+        if convention is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Company convention not found")
+        require_space(session, scope, convention.space_id, "manage")
+        changes = payload.model_dump(exclude_unset=True)
+        if "status" in changes:
+            convention.status = validate_convention_status(str(changes.pop("status")))
+        if "citations" in changes:
+            citations = [
+                item
+                if isinstance(item, ConventionCitation)
+                else ConventionCitation.model_validate(item)
+                for item in changes.pop("citations")
+            ]
+            convention.citations_json = json.dumps(
+                validate_convention_citations(
+                    request, session, scope, convention.space_id, citations
+                ),
+                ensure_ascii=False,
+            )
+        if "examples" in changes:
+            convention.examples_json = json.dumps(
+                changes.pop("examples"), ensure_ascii=False
+            )
+        for field_name in (
+            "title",
+            "category",
+            "language",
+            "framework",
+            "task",
+            "rule",
+            "prohibited_pattern",
+        ):
+            if field_name in changes:
+                value = str(changes[field_name]).strip()
+                if field_name in {"category", "language", "framework"}:
+                    value = value.lower()
+                setattr(convention, field_name, value)
+        convention.updated_at = utc_now()
+        session.add(convention)
+        audit(
+            session,
+            "company_convention.update",
+            "company_convention",
+            convention.id,
+            identity.user.id,
+        )
+        session.commit()
+        session.refresh(convention)
+        return serialize_convention(convention)
 
 
 @router.get("/embedding-profiles")
@@ -1710,13 +2045,19 @@ def import_gitlab_project(
 def list_repositories(request: Request):
     with database(request) as session:
         identity = resolve_identity(request, session)
+        if identity is None and not request.app.state.settings.allow_anonymous_search:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Authentication required")
+        scope = authorization_scope(
+            request, session, identity.user if identity else None, allow_anonymous=True
+        )
         if identity and is_admin_role(identity.user.role):
-            repositories = session.exec(
-                select(Repository).order_by(col(Repository.created_at).desc())
-            ).all()
+            statement = select(Repository).order_by(col(Repository.created_at).desc())
+            if scope.space_ids:
+                statement = statement.where(col(Repository.space_id).in_(scope.space_ids))
+            repositories = session.exec(statement).all()
         else:
             repositories = request.app.state.retriever.allowed_repositories(
-                identity.user if identity else None
+                None, authorization_scope=scope
             )
         return [serialize_repository(repo) for repo in repositories]
 
@@ -1726,6 +2067,8 @@ def create_repository(payload: RepositoryCreate, request: Request):
     with database(request) as session:
         identity = require_admin(request, session)
         require_csrf(request, identity)
+        scope = authorization_scope(request, session, identity.user)
+        require_space(session, scope, payload.space_id, "manage")
         try:
             name = validate_repository_name(payload.name)
             git_url = validate_public_git_url(
@@ -1741,6 +2084,7 @@ def create_repository(payload: RepositoryCreate, request: Request):
         repo = Repository(
             name=name, description=payload.description.strip(), git_url=git_url,
             branch=branch, visibility=payload.visibility,
+            space_id=payload.space_id,
             license_name=payload.license_name.strip(), license_url=payload.license_url.strip(),
             created_by=identity.user.id,
         )
@@ -1804,6 +2148,11 @@ def search(payload: SearchRequest, request: Request):
     client_ip = request.client.host if request.client else "unknown"
     with database(request) as session:
         identity = resolve_identity(request, session)
+        if identity is None and not request.app.state.settings.allow_anonymous_search:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Authentication required")
+        scope = authorization_scope(
+            request, session, identity.user if identity else None, allow_anonymous=True
+        )
         rate_key = identity.user.id if identity else client_ip
         limiter.check(f"search:{rate_key}", 120 if identity else 30)
         try:
@@ -1814,6 +2163,7 @@ def search(payload: SearchRequest, request: Request):
                 payload.languages or None,
                 payload.path_prefix,
                 payload.limit,
+                authorization_scope=scope,
             )
         except ValueError as exc:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
@@ -2137,6 +2487,11 @@ def chat(payload: ChatRequest, request: Request):
     client_ip = request.client.host if request.client else "unknown"
     with database(request) as session:
         identity = resolve_identity(request, session)
+        if identity is None and not request.app.state.settings.allow_anonymous_chat:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Authentication required")
+        scope = authorization_scope(
+            request, session, identity.user if identity else None, allow_anonymous=True
+        )
         rate_key = identity.user.id if identity else client_ip
         limiter.check(f"chat:{rate_key}", 20 if identity else 5)
         provider = session.exec(select(LlmProvider).where(LlmProvider.is_active)).first()
@@ -2156,6 +2511,7 @@ def chat(payload: ChatRequest, request: Request):
                 identity.user if identity else None,
                 payload.repository_ids or None,
                 [turn.model_dump() for turn in payload.history],
+                authorization_scope=scope,
             )
         except ChatUnavailableError as exc:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
@@ -2371,8 +2727,15 @@ def create_chat_session(payload: ChatSessionCreate, request: Request):
     with database(request) as session:
         identity = require_identity(request, session)
         require_csrf(request, identity)
+        scope = authorization_scope(request, session, identity.user)
+        repository_ids = sorted(set(payload.repository_ids))
+        if not set(repository_ids).issubset(scope.repository_ids):
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "Chat session references an inaccessible repository",
+            )
         normalized_title = payload.title.strip()[:200] or "新对话"
-        repository_ids_json = json.dumps(payload.repository_ids)
+        repository_ids_json = json.dumps(repository_ids)
         if payload.request_id:
             existing = session.exec(
                 select(ChatSession).where(
@@ -2493,9 +2856,18 @@ def create_chat_message(
             with Session(connection) as session:
                 identity = require_identity(request, session, lock_user=False)
                 require_csrf(request, identity)
+                scope = authorization_scope(request, session, identity.user)
                 conversation = _owned_chat_session(
                     session, session_id, identity.user.id
                 )
+                requested_repositories = set(
+                    json.loads(conversation.repository_ids_json or "[]")
+                )
+                if not requested_repositories.issubset(scope.repository_ids):
+                    raise HTTPException(
+                        status.HTTP_403_FORBIDDEN,
+                        "Chat session contains a repository that is no longer accessible",
+                    )
                 normalized_question = payload.question.strip()
                 if payload.request_id:
                     existing_user_message = session.exec(
@@ -2577,6 +2949,7 @@ def create_chat_message(
                         json.loads(conversation.repository_ids_json or "[]") or None,
                         history,
                         [item.content for item in memories],
+                        authorization_scope=scope,
                     )
                 except ChatUnavailableError as exc:
                     raise HTTPException(
@@ -2652,10 +3025,15 @@ def get_tree(
 ):
     with database(request) as session:
         identity = resolve_identity(request, session)
+        if identity is None and not request.app.state.settings.allow_anonymous_search:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Authentication required")
+        scope = authorization_scope(
+            request, session, identity.user if identity else None, allow_anonymous=True
+        )
         repositories = {
             repo.id: repo
             for repo in request.app.state.retriever.allowed_repositories(
-                identity.user if identity else None
+                None, authorization_scope=scope
             )
         }
         repository = repositories.get(repository_id)
@@ -2691,8 +3069,13 @@ def get_tree(
 def get_stats(request: Request):
     with database(request) as session:
         identity = resolve_identity(request, session)
+        if identity is None and not request.app.state.settings.allow_anonymous_search:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Authentication required")
+        scope = authorization_scope(
+            request, session, identity.user if identity else None, allow_anonymous=True
+        )
         repositories = request.app.state.retriever.allowed_repositories(
-            identity.user if identity else None
+            None, authorization_scope=scope
         )
         language_counts: dict[str, int] = {}
         for repo in repositories:
@@ -2722,9 +3105,19 @@ def get_file(
 ):
     with database(request) as session:
         identity = resolve_identity(request, session)
+        if identity is None and not request.app.state.settings.allow_anonymous_search:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Authentication required")
+        scope = authorization_scope(
+            request, session, identity.user if identity else None, allow_anonymous=True
+        )
         try:
             return request.app.state.retriever.get_file(
-                repository_id, path, identity.user if identity else None, start_line, end_line
+                repository_id,
+                path,
+                None,
+                start_line,
+                end_line,
+                authorization_scope=scope,
             )
         except PermissionError as exc:
             raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
@@ -2738,14 +3131,10 @@ def get_file(
 def list_jobs(request: Request):
     with database(request) as session:
         identity = require_identity(request, session)
+        scope = authorization_scope(request, session, identity.user)
         statement = select(IndexJob)
         if not is_admin_role(identity.user.role):
-            repository_ids = [
-                repository.id
-                for repository in request.app.state.retriever.allowed_repositories(
-                    identity.user
-                )
-            ]
+            repository_ids = list(scope.repository_ids)
             if not repository_ids:
                 return []
             statement = statement.where(
@@ -3060,7 +3449,7 @@ def revoke_repository(user_id: str, repository_id: str, request: Request):
 @router.get("/tokens")
 def list_tokens(request: Request):
     with database(request) as session:
-        identity = require_admin(request, session)
+        identity = require_identity(request, session)
         statement = select(ApiToken)
         if not is_owner_role(identity.user.role):
             statement = statement.where(ApiToken.created_by == identity.user.id)
@@ -3075,20 +3464,21 @@ def create_token(payload: TokenCreate, request: Request):
     if not scopes or not set(scopes) <= allowed_scopes:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Invalid token scopes")
     with database(request) as session:
-        identity = require_admin(request, session)
+        identity = require_identity(request, session)
         require_csrf(request, identity)
+        scope = authorization_scope(request, session, identity.user)
         repository_ids = sorted(set(payload.repository_ids))
-        if repository_ids:
-            existing_ids = set(
-                session.exec(
-                    select(Repository.id).where(col(Repository.id).in_(repository_ids))
-                ).all()
+        if not set(repository_ids).issubset(scope.repository_ids):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "Token references an inaccessible repository",
             )
-            if existing_ids != set(repository_ids):
-                raise HTTPException(
-                    status.HTTP_422_UNPROCESSABLE_CONTENT,
-                    "Token references an unknown repository",
-                )
+        space_ids = sorted(set(payload.space_ids) or set(scope.space_ids))
+        if not set(space_ids).issubset(scope.space_ids):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "Token references an inaccessible knowledge space",
+            )
         raw_token = new_secret("cat_")
         expires_at = None
         if payload.expires_in_days:
@@ -3097,6 +3487,7 @@ def create_token(payload: TokenCreate, request: Request):
             name=payload.name.strip(), token_prefix=raw_token[:12],
             token_hash=digest_secret(raw_token), scopes_json=json.dumps(scopes),
             repository_ids_json=json.dumps(repository_ids), created_by=identity.user.id,
+            space_ids_json=json.dumps(space_ids),
             expires_at=expires_at,
         )
         session.add(token)
@@ -3110,7 +3501,7 @@ def create_token(payload: TokenCreate, request: Request):
 @router.delete("/tokens/{token_id}", status_code=204)
 def revoke_token(token_id: str, request: Request):
     with database(request) as session:
-        identity = require_admin(request, session)
+        identity = require_identity(request, session)
         require_csrf(request, identity)
         token = session.get(ApiToken, token_id)
         if not token:
@@ -3144,6 +3535,7 @@ def serialize_token(token: ApiToken) -> dict:
         "id": token.id, "name": token.name, "prefix": token.token_prefix,
         "scopes": json.loads(token.scopes_json),
         "repository_ids": json.loads(token.repository_ids_json),
+        "space_ids": json.loads(token.space_ids_json or "[]"),
         "created_at": token.created_at, "expires_at": token.expires_at,
         "revoked_at": token.revoked_at,
     }

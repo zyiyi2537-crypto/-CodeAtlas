@@ -76,6 +76,30 @@ redirect-only. It removes the retired IP-allowlist include, validates the
 candidate with both `deploy/validate_nginx.py` and `nginx -t`, and restores the
 previous Nginx file if native validation fails.
 
+### GitHub Actions delivery
+
+GitHub Actions builds and delivers releases to the existing server; it does not
+host the FastAPI process, MySQL, Chroma, Git cache, or document storage. Protect
+the `production` GitHub Environment with required reviewers and configure these
+secrets:
+
+- `DEPLOY_HOST`: SSH hostname only.
+- `DEPLOY_USER`: a dedicated SSH account with passwordless `sudo` permission for
+  `deploy/install.sh` and the service operations it performs.
+- `DEPLOY_SSH_KEY`: the matching private deployment key.
+- `DEPLOY_KNOWN_HOSTS`: a pinned `known_hosts` entry obtained through an
+  independently verified channel.
+- `CODEATLAS_PUBLIC_ORIGIN`: the canonical HTTPS origin used by the post-deploy
+  revision check.
+
+After `ci` succeeds on `main`, `.github/workflows/deploy.yml` downloads the exact
+frontend and blog artifacts from that run, packages the backend and deployment
+files at the same commit, uploads a SHA-256 protected release, and invokes the
+installer. The installer builds candidate backend and web directories before
+switching them into place. A failed local or HTTPS health check restores the
+previous code, static files, Nginx/systemd configuration, and build revision.
+`/api/v1/health` exposes the deployed commit in its `revision` field.
+
 ## Backup
 
 Run `deploy/backup.sh` as root. It briefly stops CodeAtlas so MySQL and Chroma

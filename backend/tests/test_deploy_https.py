@@ -22,6 +22,8 @@ def test_nginx_template_never_proxies_application_over_http() -> None:
     assert "ssl_certificate" in https_block
     assert "proxy_pass http://127.0.0.1:8010/api/v1/" in https_block
     assert "codeatlas-allowlist" not in config
+    assert 'Strict-Transport-Security "max-age=31536000" always' in config
+    assert "_astro|assets|images|lab/code-kb/assets" in config
 
 
 def test_installer_fails_closed_without_https_and_migrates_old_allowlist() -> None:
@@ -40,9 +42,10 @@ def test_installer_fails_closed_without_https_and_migrates_old_allowlist() -> No
     assert 'command -v "$PYTHON_BIN"' in installer
     assert 'sys.version_info >= (3, 11)' in installer
     assert '"$PYTHON_BIN" "$SOURCE_ROOT/deploy/validate_nginx.py"' in installer
-    assert '"$PYTHON_BIN" -m venv /opt/codeatlas/backend/.venv' in installer
+    assert '"$PYTHON_BIN" -m venv "$BACKEND_CANDIDATE/.venv"' in installer
+    assert 'REVISION_ENV_FILE=/etc/codeatlas/revision.env' in installer
     assert 'python3 "$SOURCE_ROOT/deploy/validate_nginx.py"' not in installer
-    assert "cd /opt/codeatlas/backend" in installer
+    assert 'cd "$BACKEND_CANDIDATE"' in installer
     assert ".venv/bin/python -m alembic -c alembic.ini upgrade head" in installer
     assert 'nginx -t -c "$NGINX_PREFLIGHT"' in installer
     assert installer.index('nginx -t -c "$NGINX_PREFLIGHT"') < installer.index(
@@ -91,6 +94,22 @@ def test_installer_fails_closed_without_https_and_migrates_old_allowlist() -> No
     assert 'systemctl reload nginx || true' not in installer
     assert 'systemctl stop nginx || true' not in installer
     assert "ROLLBACK FAILED" in installer
+    assert "switch_release()" in installer
+    assert "restore_release()" in installer
+    assert 'switch_release || fail_nginx_switch "Release switch failed"' in installer
+
+
+def test_deploy_only_accepts_successful_pushes_from_this_repository() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "github.event.workflow_run.conclusion == 'success'" in workflow
+    assert "github.event.workflow_run.event == 'push'" in workflow
+    assert (
+        "github.event.workflow_run.head_repository.full_name == github.repository"
+        in workflow
+    )
 
 
 def test_nginx_validator_accepts_acme_and_plaintext_redirects(tmp_path: Path) -> None:

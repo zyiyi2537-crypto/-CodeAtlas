@@ -2,13 +2,33 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-CodeAtlas is a private code knowledge base and MCP retrieval service. It indexes
-versioned Git repositories, combines vector and MySQL FULLTEXT retrieval (ngram parser),
-and returns code evidence with repository, commit, symbol, path, and line metadata.
+CodeAtlas is a knowledge and understanding layer for a team's internal code assets. It
+connects GitHub, GitLab, and project documents, provides verifiable code retrieval and
+Q&A through permission-aware hybrid RAG, and safely exposes company engineering
+conventions and existing implementations to coding agents such as Codex through a
+read-only MCP server.
 
 The public deployment is a controlled evaluation environment backed only by small,
 permissively licensed open-source repositories. Private code and existing local
 Chroma data are never imported into the public environment.
+
+## Current Capabilities
+
+- **Permission-aware knowledge spaces**: repositories, documents, Wiki content,
+  browser sessions, and MCP tokens share one authorization boundary enforced before
+  retrieval.
+- **Verifiable hybrid retrieval**: vector search and MySQL FULLTEXT return repository,
+  commit, path, symbol, and line-level evidence.
+- **Read-only MCP for Codex**: search code, read bounded file ranges, find references,
+  query documents and Wiki pages, and retrieve source-backed engineering conventions.
+- **Multi-source ingestion**: GitHub, GitLab, uploaded documents, S3, COS, Notion, and
+  Confluence are supported as code or read-only knowledge sources.
+- **Internal evaluation delivery**: GitHub Actions builds and deploys to a self-hosted
+  server with artifact verification, health checks, and release rollback.
+
+Automatic code Wiki generation, interactive code maps, and guided tours are planned
+but are not shipped as current capabilities. See the
+[product requirements](docs/product-requirements.zh-CN.md) for the complete roadmap.
 
 ## Architecture
 
@@ -99,25 +119,23 @@ task recovery, and private repository isolation.
 
 ## MCP
 
-Streamable HTTP is exposed at `/mcp` and requires an API Token:
+Streamable HTTP is exposed at `/mcp` and requires a personal read-only token. Inject
+the token through an environment variable instead of storing it in the repository or
+Codex configuration:
 
-```json
-{
-  "mcpServers": {
-    "codeatlas": {
-      "type": "streamable-http",
-      "url": "https://codeatlas.example.com/mcp",
-      "headers": {
-        "Authorization": "Bearer cat_REPLACE_WITH_TOKEN"
-      }
-    }
-  }
-}
+```powershell
+$env:CODEATLAS_MCP_TOKEN = Read-Host "CodeAtlas MCP Token"
+codex mcp add codeatlas `
+  --url "https://codeatlas.example.com/mcp" `
+  --bearer-token-env-var CODEATLAS_MCP_TOKEN
 ```
 
 For local stdio, set `CODEATLAS_MCP_TOKEN` and run `codeatlas-mcp`. Available
 tools are `list_repositories`, `search_code`, `grep_code`, `get_file`,
-`find_references`, and `index_status`.
+`find_references`, `search_documents`, `search_wiki`, `get_wiki_page`,
+`search_knowledge`, `get_company_conventions`, and `index_status`. See
+[Codex MCP setup](docs/codex-mcp.zh-CN.md) for environment-only credential
+configuration and a project-level `AGENTS.md` template.
 
 ## Unified structured RAG
 
@@ -239,7 +257,8 @@ startup fallback when no third-party key is installed.
   repositories are rejected.
 - File preview rejects path and symlink escape and returns at most 200 lines or
   64 KB.
-- Anonymous search is limited to 30 requests per IP per minute.
+- Anonymous search and chat are disabled by default. When explicitly enabled for
+  testing, anonymous search remains limited to 30 requests per IP per minute.
 
 The Alibaba Cloud security-group rule for the retired Qinglong port `15700`
 must still be removed in the cloud console; CodeAtlas does not reuse that port.

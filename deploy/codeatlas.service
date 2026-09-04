@@ -9,6 +9,7 @@ User=codeatlas
 Group=codeatlas
 WorkingDirectory=/opt/codeatlas/backend
 EnvironmentFile=/etc/codeatlas/codeatlas.env
+EnvironmentFile=-/etc/codeatlas/revision.env
 Environment=HOME=/var/lib/codeatlas
 ExecStartPre=/opt/codeatlas/backend/.venv/bin/alembic -c /opt/codeatlas/backend/alembic.ini upgrade head
 ExecStart=/opt/codeatlas/backend/.venv/bin/uvicorn codeatlas.app:create_app --factory --host 127.0.0.1 --port 8010 --workers 1 --proxy-headers --forwarded-allow-ips=127.0.0.1

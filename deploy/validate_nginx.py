@@ -273,6 +273,7 @@ def _canonical_tls_statements(expected_domain: str) -> set[str]:
         "ssl_session_tickets off",
         'add_header X-Content-Type-Options "nosniff" always',
         'add_header X-Frame-Options "DENY" always',
+        'add_header Strict-Transport-Security "max-age=31536000" always',
         'add_header Referrer-Policy "strict-origin-when-cross-origin" always',
         'add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always',
         content_security_policy,
@@ -283,7 +284,7 @@ def _canonical_tls_statements(expected_domain: str) -> set[str]:
 
 def _canonical_tls_locations() -> dict[str, set[str]]:
     immutable_asset_location = (
-        'location ~* "^/(assets|images|lab/code-kb/assets)/.+\\.[a-f0-9]{8,}'
+        'location ~* "^/(_astro|assets|images|lab/code-kb/assets)/.+\\.[a-f0-9_-]{8,}'
         '\\.(css|js|png|jpg|jpeg|webp|svg|woff2)$"'
     )
     common_proxy = {

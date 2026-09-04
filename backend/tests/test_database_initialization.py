@@ -12,7 +12,7 @@ class _Result:
 
 class _Session:
     def __init__(self, _engine):
-        pass
+        self.records: dict[tuple[type, str], object] = {}
 
     def __enter__(self):
         return self
@@ -22,6 +22,15 @@ class _Session:
 
     def exec(self, _statement):
         return _Result()
+
+    def get(self, model, record_id):
+        return self.records.get((model, record_id))
+
+    def add(self, record):
+        self.records[(type(record), record.id)] = record
+
+    def flush(self):
+        pass
 
     def commit(self):
         pass

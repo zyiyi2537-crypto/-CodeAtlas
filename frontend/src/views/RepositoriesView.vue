@@ -1,16 +1,17 @@
 <script setup lang="ts">
 import { useMutation, useQuery, useQueryClient } from '@tanstack/vue-query'
 import { Archive, Plus, RefreshCw, X } from 'lucide-vue-next'
-import { reactive, ref } from 'vue'
+import { reactive, ref, watchEffect } from 'vue'
 
 import { api, errorMessage } from '@/api'
-import { csrfHeaders } from '@/auth'
+import { csrfHeaders, useAuth } from '@/auth'
 import EmptyState from '@/components/EmptyState.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import { formatDate, formatNumber, shortCommit } from '@/format'
-import type { IndexJob, Repository } from '@/types'
+import type { IndexJob, KnowledgeSpace, Repository } from '@/types'
 
 const queryClient = useQueryClient()
+const { isAdmin } = useAuth()
 const showCreate = ref(false)
 const formError = ref('')
 const form = reactive({
@@ -18,7 +19,8 @@ const form = reactive({
   description: '',
   git_url: '',
   branch: 'main',
-  visibility: 'public',
+  visibility: 'private',
+  space_id: '',
   license_name: '',
   license_url: '',
 })
@@ -27,6 +29,14 @@ const repositories = useQuery({
   queryKey: ['repositories'],
   queryFn: async () => (await api.get<Repository[]>('/repositories')).data,
 })
+const spaces = useQuery({
+  queryKey: ['spaces'],
+  queryFn: async () => (await api.get<KnowledgeSpace[]>('/spaces')).data,
+})
+
+watchEffect(() => {
+  if (!form.space_id && spaces.data.value?.[0]) form.space_id = spaces.data.value[0].id
+})
 
 const createRepository = useMutation({
   mutationFn: async () =>
@@ -34,7 +44,8 @@ const createRepository = useMutation({
   onSuccess: async () => {
     showCreate.value = false
     Object.assign(form, {
-      name: '', description: '', git_url: '', branch: 'main', visibility: 'public',
+      name: '', description: '', git_url: '', branch: 'main', visibility: 'private',
+      space_id: spaces.data.value?.[0]?.id ?? '',
       license_name: '', license_url: '',
     })
     await queryClient.invalidateQueries({ queryKey: ['repositories'] })
@@ -66,7 +77,7 @@ function closeCreateDialog() {
   <div class="page-container">
     <section class="page-heading">
       <div><p class="eyebrow">SOURCES</p><h1>仓库</h1></div>
-      <button class="command-button" type="button" @click="showCreate = true">
+      <button v-if="isAdmin" class="command-button" type="button" @click="showCreate = true">
         <Plus :size="17" />新增仓库
       </button>
     </section>
@@ -79,7 +90,7 @@ function closeCreateDialog() {
       <div class="data-table-wrap" v-if="repositories.data.value?.length">
         <table class="data-table repository-table">
           <thead>
-            <tr><th>仓库</th><th>状态</th><th>可见性</th><th>索引</th><th>提交</th><th>最近更新</th><th></th></tr>
+            <tr><th>仓库</th><th>状态</th><th>可见性</th><th>索引</th><th>提交</th><th>最近更新</th><th v-if="isAdmin"></th></tr>
           </thead>
           <tbody>
             <tr v-for="repo in repositories.data.value" :key="repo.id">
@@ -92,7 +103,7 @@ function closeCreateDialog() {
               <td>{{ formatNumber(repo.chunk_count) }}</td>
               <td class="mono-cell">{{ shortCommit(repo.last_commit) }}</td>
               <td>{{ formatDate(repo.last_indexed_at) }}</td>
-              <td class="row-actions">
+              <td v-if="isAdmin" class="row-actions">
                 <button class="icon-button tooltip" type="button" data-tooltip="同步仓库" aria-label="同步仓库" @click="syncRepository.mutate(repo.id)">
                   <RefreshCw :size="17" />
                 </button>
@@ -116,6 +127,7 @@ function closeCreateDialog() {
         <form class="stack-form two-column-form" @submit.prevent="createRepository.mutate()">
           <label><span>名称</span><input v-model="form.name" pattern="[a-z0-9][a-z0-9._-]+" required /></label>
           <label><span>分支</span><input v-model="form.branch" required /></label>
+          <label class="full-span"><span>知识空间</span><select v-model="form.space_id" required><option v-for="space in spaces.data.value" :key="space.id" :value="space.id">{{ space.name }}</option></select></label>
           <label class="full-span"><span>Git HTTPS URL</span><input v-model="form.git_url" type="url" required /></label>
           <label class="full-span"><span>描述</span><textarea v-model="form.description" rows="3" /></label>
           <label><span>可见性</span><select v-model="form.visibility"><option value="public">public</option><option value="private">private</option></select></label>

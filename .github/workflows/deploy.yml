@@ -1,0 +1,84 @@
+name: deploy
+
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: codeatlas-production
+  cancel-in-progress: false
+
+jobs:
+  production:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: release/frontend-dist
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: blog-dist
+          path: release/blog-dist
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Assemble release
+        env:
+          RELEASE_REVISION: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          rsync -a --exclude .venv --exclude data backend/ release/backend/
+          cp -a deploy release/deploy
+          cp -a blog/src/content release/blog-content
+          printf '%s\n' "$RELEASE_REVISION" > release/REVISION
+          tar -C release -czf "codeatlas-$RELEASE_REVISION.tar.gz" .
+          sha256sum "codeatlas-$RELEASE_REVISION.tar.gz" > "codeatlas-$RELEASE_REVISION.tar.gz.sha256"
+
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -d -m 0700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 0600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+
+      - name: Upload and deploy verified release
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          RELEASE_REVISION: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          remote_dir="/tmp/codeatlas-$RELEASE_REVISION"
+          archive="codeatlas-$RELEASE_REVISION.tar.gz"
+          ssh "$DEPLOY_USER@$DEPLOY_HOST" "install -d -m 0700 '$remote_dir'"
+          scp "$archive" "$archive.sha256" "$DEPLOY_USER@$DEPLOY_HOST:$remote_dir/"
+          ssh "$DEPLOY_USER@$DEPLOY_HOST" \
+            "cd '$remote_dir' && sha256sum -c '$archive.sha256' && install -d -m 0700 release && tar -xzf '$archive' -C release && sudo release/deploy/install.sh '$remote_dir/release'"
+
+      - name: Verify deployed revision
+        env:
+          CODEATLAS_PUBLIC_ORIGIN: ${{ secrets.CODEATLAS_PUBLIC_ORIGIN }}
+          RELEASE_REVISION: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          response=$(curl --fail --silent --show-error "$CODEATLAS_PUBLIC_ORIGIN/api/code-kb/health")
+          python -c 'import json, os, sys; data=json.load(sys.stdin); assert data["revision"] == os.environ["RELEASE_REVISION"], data' <<< "$response"

@@ -751,6 +751,7 @@ def test_mcp_tools_are_declared_read_only(monkeypatch) -> None:
         "search_documents",
         "search_wiki",
         "get_wiki_page",
+        "get_company_conventions",
         "search_knowledge",
     }
     for tool_annotations in annotations_by_tool.values():

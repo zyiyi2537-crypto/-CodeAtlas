@@ -2,9 +2,19 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-CodeAtlas 是面向企业私有代码的知识库与 MCP 检索服务。它能够索引具有版本信息的 Git 仓库，融合向量检索与 MySQL FULLTEXT 检索（ngram 分词器），并返回包含仓库、提交、符号、路径及行号元数据的代码证据。
+CodeAtlas 是面向研发团队内部代码资产的知识与理解层。它连接 GitHub、GitLab 和项目文档，通过权限感知的混合 RAG 提供可验证的代码检索与问答，并以只读 MCP 服务将公司工程规范和既有实现安全地提供给 Codex 等编码代理。
 
 公开部署仅作为受控评估环境，只索引少量采用宽松许可证的开源仓库。私有代码和现有本地 Chroma 数据绝不会导入公开环境。
+
+## 当前能力
+
+- **权限感知的知识空间**：仓库、文档、Wiki、浏览器会话和 MCP Token 使用统一授权边界，权限在召回前执行。
+- **可验证的混合检索**：融合向量检索与 MySQL FULLTEXT，结果包含仓库、Commit、路径、符号和行号。
+- **Codex 只读 MCP**：支持搜索代码、读取必要片段、查找引用、检索文档与 Wiki，并获取带源码证据的公司工程规范。
+- **多源知识接入**：支持 GitHub、GitLab、手动文档以及 S3、COS、Notion、Confluence 等只读知识源。
+- **内部测试部署链路**：GitHub Actions 构建并发布到自有服务器，包含产物校验、健康检查和版本回滚。
+
+自动代码 Wiki、交互式代码地图和引导式导览已进入产品规划，尚未作为当前版本能力发布。完整范围见 [产品需求文档](docs/product-requirements.zh-CN.md)。
 
 ## 架构
 
@@ -87,23 +97,16 @@ pnpm build
 
 ## MCP
 
-Streamable HTTP MCP 暴露于 `/mcp`，并要求提供 API Token：
+Streamable HTTP MCP 暴露于 `/mcp`，并要求提供个人只读 Token。Token 通过环境变量注入，不写入仓库或 Codex 配置：
 
-```json
-{
-  "mcpServers": {
-    "codeatlas": {
-      "type": "streamable-http",
-      "url": "https://codeatlas.example.com/mcp",
-      "headers": {
-        "Authorization": "Bearer cat_REPLACE_WITH_TOKEN"
-      }
-    }
-  }
-}
+```powershell
+$env:CODEATLAS_MCP_TOKEN = Read-Host "CodeAtlas MCP Token"
+codex mcp add codeatlas `
+  --url "https://codeatlas.example.com/mcp" `
+  --bearer-token-env-var CODEATLAS_MCP_TOKEN
 ```
 
-如需使用本地 stdio，请设置 `CODEATLAS_MCP_TOKEN` 并运行 `codeatlas-mcp`。可用工具包括 `list_repositories`、`search_code`、`grep_code`、`get_file`、`find_references` 和 `index_status`。
+如需使用本地 stdio，请设置 `CODEATLAS_MCP_TOKEN` 并运行 `codeatlas-mcp`。可用工具包括 `list_repositories`、`search_code`、`grep_code`、`get_file`、`find_references`、`search_documents`、`search_wiki`、`get_wiki_page`、`search_knowledge`、`get_company_conventions` 和 `index_status`。完整的安全配置与项目级 `AGENTS.md` 模板见 [Codex 接入 CodeAtlas MCP](docs/codex-mcp.zh-CN.md)。
 
 ## 统一结构化 RAG
 
@@ -142,7 +145,7 @@ VersionId/DeleteMarker 同步属于后续增强，不计入本阶段完成范围
 
 ## 部署
 
-当前域名前部署方式将 Uvicorn 绑定到 `127.0.0.1:8010`，并由 Nginx 在 80 端口通过管理员 IP 白名单对外提供服务。`systemd` 强制使用单个 worker，软内存限制为 550 MB，硬限制为 700 MB。日志保留在 `journald` 中，不包含在备份内。
+当前部署方式将 Uvicorn 绑定到 `127.0.0.1:8010`，并由 Nginx 通过 HTTPS 对外提供服务。`systemd` 强制使用单个 worker，软内存限制为 550 MB，硬限制为 700 MB。日志保留在 `journald` 中，不包含在备份内。GitHub Actions 负责检查、构建和向自有服务器发布，不承载 MySQL、Chroma 或应用运行时。
 
 迁移或恢复数据前，请阅读 [deploy/RESTORE.md](deploy/RESTORE.md) 和 [docs/operations.md](docs/operations.md)。
 
@@ -184,6 +187,6 @@ CODEATLAS_CREDENTIAL_SILICONFLOW_EMBEDDING=your-real-key
 - Git 主机必须位于允许列表中，且 DNS 解析结果必须为可公开路由地址。
 - 系统拒绝包含嵌入式凭据的地址、Git Submodule、Git LFS、不安全分支及超大仓库。
 - 文件预览会阻止路径与符号链接越界，最多返回 200 行或 64 KB。
-- 匿名检索限制为每个 IP 每分钟 30 次请求。
+- 匿名检索和匿名问答默认关闭；测试环境显式启用后，匿名检索仍限制为每个 IP 每分钟 30 次请求。
 
 已停用的青龙端口 `15700` 所对应的阿里云安全组规则仍需在云控制台中删除；CodeAtlas 不会复用该端口。

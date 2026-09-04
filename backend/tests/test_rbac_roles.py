@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -331,22 +332,45 @@ def test_workspace_admin_only_lists_and_revokes_owned_tokens(
         assert stored_peer is not None and stored_peer.revoked_at is None
 
 
-def test_mcp_token_follows_the_owners_current_administrator_role(application) -> None:
+def test_mcp_token_follows_the_owners_current_repository_access(application) -> None:
     actor = add_user(application, "token-owner@example.com", "workspace_admin")
     raw_token = "cat_dynamic_role_probe"
     with Session(application.state.engine) as session:
+        public_repository = Repository(
+            name="dynamic-public",
+            git_url="https://github.com/example/dynamic-public.git",
+            visibility="public",
+            created_by=actor.id,
+        )
+        private_repository = Repository(
+            name="dynamic-private",
+            git_url="https://github.com/example/dynamic-private.git",
+            visibility="private",
+            created_by=actor.id,
+        )
+        session.add_all([public_repository, private_repository])
+        session.flush()
         token = ApiToken(
             name="dynamic role",
             token_prefix=raw_token[:12],
             token_hash=digest_secret(raw_token),
-            repository_ids_json='["repo-1"]',
+            repository_ids_json=json.dumps(
+                [public_repository.id, private_repository.id]
+            ),
             created_by=actor.id,
         )
         session.add(token)
         session.commit()
         token_id = token.id
+        public_repository_id = public_repository.id
+        private_repository_id = private_repository.id
 
-    assert resolve_token_identity(application.state.engine, raw_token) is not None
+    initial_identity = resolve_token_identity(application.state.engine, raw_token)
+    assert initial_identity is not None
+    assert set(initial_identity.repository_ids) == {
+        public_repository_id,
+        private_repository_id,
+    }
     with Session(application.state.engine) as session:
         stored_actor = session.get(User, actor.id)
         assert stored_actor is not None
@@ -354,18 +378,27 @@ def test_mcp_token_follows_the_owners_current_administrator_role(application) ->
         session.add(stored_actor)
         session.commit()
 
-    assert resolve_token_identity(application.state.engine, raw_token) is None
+    member_identity = resolve_token_identity(application.state.engine, raw_token)
+    assert member_identity is not None
+    assert member_identity.repository_ids == (public_repository_id,)
     with Session(application.state.engine) as session:
         stored_token = session.get(ApiToken, token_id)
         assert stored_token is not None
         assert stored_token.revoked_at is None
-        stored_actor = session.get(User, actor.id)
-        assert stored_actor is not None
-        stored_actor.role = "workspace_admin"
-        session.add(stored_actor)
+        session.add(
+            RepositoryAccess(
+                repository_id=private_repository_id,
+                user_id=actor.id,
+            )
+        )
         session.commit()
 
-    assert resolve_token_identity(application.state.engine, raw_token) is not None
+    granted_identity = resolve_token_identity(application.state.engine, raw_token)
+    assert granted_identity is not None
+    assert set(granted_identity.repository_ids) == {
+        public_repository_id,
+        private_repository_id,
+    }
 
 
 def test_member_creation_waits_for_role_configuration_lock(

@@ -93,6 +93,7 @@ class IndexCoordinator:
                 session.add(repository)
                 session.commit()
                 repository_id = repository.id
+                space_id = repository.space_id
                 git_url = repository.git_url
                 branch = repository.branch
                 requested_commit = job.commit
@@ -147,9 +148,15 @@ class IndexCoordinator:
             store = VectorStore(
                 embedding_settings, namespace=generation_vector_namespace
             )
-            store.add_generation(chunks, EmbeddingClient(embedding_settings))
+            store.add_generation(
+                chunks,
+                EmbeddingClient(embedding_settings),
+                space_id=space_id,
+            )
             self._progress(job_id, 80, "Activating search index")
-            self._activate_generation(repository_id, generation_id, commit, str(root), chunks)
+            self._activate_generation(
+                repository_id, space_id, generation_id, commit, str(root), chunks
+            )
 
             with Session(self.engine) as session:
                 job = session.get(IndexJob, job_id)
@@ -225,6 +232,7 @@ class IndexCoordinator:
     def _activate_generation(
         self,
         repository_id: str,
+        space_id: str,
         generation_id: str,
         commit: str,
         root: str,
@@ -236,6 +244,7 @@ class IndexCoordinator:
                     id=chunk.id,
                     generation_id=generation_id,
                     repository_id=repository_id,
+                    space_id=space_id,
                     commit=commit,
                     path=chunk.path,
                     language=chunk.language,

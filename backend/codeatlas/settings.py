@@ -17,6 +17,9 @@ class Settings:
     environment: str
     public_origin: str
     cookie_secure: bool
+    allow_anonymous_search: bool
+    allow_anonymous_chat: bool
+    build_revision: str
     allowed_git_hosts: tuple[str, ...]
     mcp_allowed_hosts: tuple[str, ...]
     embedding_mode: str
@@ -51,6 +54,15 @@ class Settings:
             ).rstrip("/"),
             cookie_secure=os.getenv("CODEATLAS_COOKIE_SECURE", "false").lower()
             in {"1", "true", "yes", "on"},
+            allow_anonymous_search=os.getenv(
+                "CODEATLAS_ALLOW_ANONYMOUS_SEARCH", "false"
+            ).lower()
+            in {"1", "true", "yes", "on"},
+            allow_anonymous_chat=os.getenv(
+                "CODEATLAS_ALLOW_ANONYMOUS_CHAT", "false"
+            ).lower()
+            in {"1", "true", "yes", "on"},
+            build_revision=os.getenv("CODEATLAS_BUILD_REVISION", "development").strip()[:64],
             allowed_git_hosts=tuple(
                 item.strip().lower()
                 for item in os.getenv(

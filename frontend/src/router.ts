@@ -5,6 +5,7 @@ import { isAdminRole } from '@/roles'
 import JobsView from '@/views/JobsView.vue'
 import BrowseView from '@/views/BrowseView.vue'
 import ChatView from '@/views/ChatView.vue'
+import CompanyConventionsView from '@/views/CompanyConventionsView.vue'
 import DocumentsView from '@/views/DocumentsView.vue'
 import EmbeddingProfilesView from '@/views/EmbeddingProfilesView.vue'
 import ExternalSourcesView from '@/views/ExternalSourcesView.vue'
@@ -72,7 +73,13 @@ export const router = createRouter({
       path: '/repositories',
       name: 'repositories',
       component: RepositoriesView,
-      meta: { requiresAdmin: true },
+      meta: { requiresAuth: true },
+    },
+    {
+      path: '/company-conventions',
+      name: 'company-conventions',
+      component: CompanyConventionsView,
+      meta: { requiresAuth: true },
     },
     {
       path: '/jobs',
@@ -90,7 +97,7 @@ export const router = createRouter({
       path: '/tokens',
       name: 'tokens',
       component: TokensView,
-      meta: { requiresAdmin: true },
+      meta: { requiresAuth: true },
     },
     { path: '/:pathMatch(.*)*', component: NotFoundView },
   ],

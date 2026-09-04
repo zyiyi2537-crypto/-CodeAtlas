@@ -16,7 +16,7 @@ from openpyxl import load_workbook
 from openpyxl.utils.cell import range_boundaries
 from pptx import Presentation
 
-from .models import DocumentChunkRecord
+from .models import DEFAULT_SPACE_ID, DocumentChunkRecord
 from .security import redact_secrets
 
 _ALLOWED = {".md", ".markdown", ".txt", ".csv", ".docx", ".xlsx", ".pdf", ".pptx"}
@@ -513,6 +513,7 @@ def chunk_document(
     max_chars: int = 3500,
     *,
     blocks: list[StructuredBlock] | None = None,
+    space_id: str = DEFAULT_SPACE_ID,
 ) -> list[DocumentChunkRecord]:
     structured = blocks if blocks is not None else _markdown_blocks(text or "")
     chunks: list[DocumentChunkRecord] = []
@@ -532,6 +533,7 @@ def chunk_document(
                 id=chunk_id,
                 document_id=document_id,
                 collection_id=collection_id,
+                space_id=space_id,
                 title=title,
                 section=chunk.section,
                 page=chunk.page,

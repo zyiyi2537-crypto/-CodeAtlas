@@ -1014,14 +1014,16 @@ textarea:focus {
 
 .status-ready,
 .status-succeeded,
-.status-active {
+.status-active,
+.status-confirmed {
   color: var(--pine-strong);
   background: var(--pine-soft);
 }
 
 .status-ready .status-dot,
 .status-succeeded .status-dot,
-.status-active .status-dot {
+.status-active .status-dot,
+.status-confirmed .status-dot {
   background: var(--pine);
 }
 
@@ -1037,24 +1039,30 @@ textarea:focus {
 }
 
 .status-queued,
-.status-pending {
+.status-pending,
+.status-draft,
+.status-inferred {
   color: #7d5719;
   background: #faf0dc;
 }
 
 .status-queued .status-dot,
-.status-pending .status-dot {
+.status-pending .status-dot,
+.status-draft .status-dot,
+.status-inferred .status-dot {
   background: #be7b19;
 }
 
 .status-failed,
-.status-archived {
+.status-archived,
+.status-deprecated {
   color: #993531;
   background: #fae9e8;
 }
 
 .status-failed .status-dot,
-.status-archived .status-dot {
+.status-archived .status-dot,
+.status-deprecated .status-dot {
   background: #c64a45;
 }
 
@@ -3037,6 +3045,143 @@ fieldset small {
 .gitlab-project-import { justify-self: end; white-space: nowrap; }
 .form-hint { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
 
+.convention-toolbar {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) repeat(3, minmax(130px, 1fr)) 38px;
+  align-items: end;
+  gap: 10px;
+  margin-top: 22px;
+  padding: 14px 16px;
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.convention-toolbar label {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.convention-toolbar label > span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.convention-list {
+  background: var(--surface);
+}
+
+.convention-row {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 13px;
+  padding: 17px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.convention-icon {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  color: var(--pine-strong);
+  background: var(--pine-soft);
+  border-radius: 4px;
+}
+
+.convention-main {
+  min-width: 0;
+  display: grid;
+  gap: 9px;
+}
+
+.convention-title-line,
+.convention-tags,
+.citation-list,
+.convention-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.convention-title-line strong {
+  overflow-wrap: anywhere;
+}
+
+.convention-tags span {
+  padding: 3px 6px;
+  color: var(--muted);
+  background: var(--surface-soft);
+  border-radius: 3px;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.convention-main p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  line-height: 1.7;
+}
+
+.convention-main .prohibited-pattern {
+  color: #8a3835;
+  font-size: 13px;
+}
+
+.citation-list {
+  align-items: stretch;
+}
+
+.citation-list > span {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.citation-list code {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.convention-meta {
+  justify-content: flex-end;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.convention-dialog {
+  width: min(940px, 100%);
+}
+
+.citation-editor {
+  display: grid;
+  gap: 12px;
+}
+
+.citation-editor-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) minmax(180px, 1.3fr) minmax(180px, 1.4fr) minmax(120px, 1fr) 82px 82px 38px;
+  align-items: end;
+  gap: 8px;
+}
+
+.citation-editor-row label {
+  min-width: 0;
+}
+
+.citation-add {
+  width: fit-content;
+}
+
 @media (max-width: 760px) {
   .source-card {
     display: grid;
@@ -3084,6 +3229,36 @@ fieldset small {
   .gitlab-project-import {
     grid-column: 2;
     justify-self: start;
+  }
+
+  .convention-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .convention-toolbar > .icon-button {
+    justify-self: end;
+  }
+
+  .convention-row {
+    grid-template-columns: 36px minmax(0, 1fr);
+  }
+
+  .convention-meta {
+    grid-column: 2;
+    justify-content: flex-start;
+  }
+
+  .citation-editor-row {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .citation-editor-row .citation-path,
+  .citation-editor-row > button {
+    grid-column: 1 / -1;
+  }
+
+  .citation-editor-row > button {
+    justify-self: end;
   }
 }
 

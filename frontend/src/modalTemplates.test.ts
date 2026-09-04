@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 const modalFiles = [
+  './views/CompanyConventionsView.vue',
   './views/DocumentsView.vue',
   './views/EmbeddingProfilesView.vue',
   './views/ExternalSourcesView.vue',
@@ -38,7 +39,7 @@ describe('modal template contract', () => {
   })
 
   it('keeps Codex MCP credentials out of config.toml', () => {
-    const markup = source('./views/TokensView.vue')
+    const markup = source('./mcpConfig.ts')
 
     expect(markup).toContain('--bearer-token-env-var CODEATLAS_MCP_TOKEN')
     expect(markup).not.toContain('http_headers = { Authorization')

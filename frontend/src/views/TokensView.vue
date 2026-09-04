@@ -7,7 +7,8 @@ import { api, errorMessage } from '@/api'
 import { csrfHeaders } from '@/auth'
 import EmptyState from '@/components/EmptyState.vue'
 import { formatDate } from '@/format'
-import type { ApiToken, Repository } from '@/types'
+import { buildMcpInstallConfig } from '@/mcpConfig'
+import type { ApiToken, KnowledgeSpace, Repository } from '@/types'
 
 const queryClient = useQueryClient()
 const showCreate = ref(false)
@@ -15,30 +16,18 @@ const activeTokenId = ref<string | null>(null)
 const sessionTokens = reactive<Record<string, string>>({})
 const copied = ref<'token' | 'config' | ''>('')
 const installTarget = ref<'codex' | 'claude' | 'json'>('codex')
-const form = reactive({ name: '', scopes: ['status', 'search', 'read'], repository_ids: [] as string[] })
+const form = reactive({
+  name: '',
+  scopes: ['status', 'search', 'read'],
+  repository_ids: [] as string[],
+  space_ids: [] as string[],
+})
 const expiresInDays = ref<number | null>(null)
 
 const mcpUrl = computed(() => `${window.location.origin}/mcp`)
 const revealedToken = computed(() => activeTokenId.value ? (sessionTokens[activeTokenId.value] ?? '') : '')
 const isSecureMcp = computed(() => window.location.protocol === 'https:' || ['localhost', '127.0.0.1'].includes(window.location.hostname))
-const installConfig = computed(() => {
-  const authorization = `Bearer ${revealedToken.value}`
-  if (installTarget.value === 'codex') {
-    return `codex mcp add codeatlas --url "${mcpUrl.value}" --bearer-token-env-var CODEATLAS_MCP_TOKEN`
-  }
-  if (installTarget.value === 'claude') {
-    return `claude mcp add --transport http --scope user codeatlas "${mcpUrl.value}" --header "Authorization: ${authorization}"`
-  }
-  return JSON.stringify({
-    mcpServers: {
-      codeatlas: {
-        type: 'http',
-        url: mcpUrl.value,
-        headers: { Authorization: authorization },
-      },
-    },
-  }, null, 2)
-})
+const installConfig = computed(() => buildMcpInstallConfig(installTarget.value, mcpUrl.value))
 
 const tokens = useQuery({
   queryKey: ['tokens'],
@@ -48,6 +37,10 @@ const activeTokens = computed(() => tokens.data.value?.filter((token) => !token.
 const repositories = useQuery({
   queryKey: ['repositories'],
   queryFn: async () => (await api.get<Repository[]>('/repositories')).data,
+})
+const spaces = useQuery({
+  queryKey: ['spaces'],
+  queryFn: async () => (await api.get<KnowledgeSpace[]>('/spaces')).data,
 })
 
 const createToken = useMutation({
@@ -60,7 +53,12 @@ const createToken = useMutation({
     if (token.token) sessionTokens[token.id] = token.token
     activeTokenId.value = token.id
     showCreate.value = false
-    Object.assign(form, { name: '', scopes: ['status', 'search', 'read'], repository_ids: [] })
+    Object.assign(form, {
+      name: '',
+      scopes: ['status', 'search', 'read'],
+      repository_ids: [],
+      space_ids: [],
+    })
     expiresInDays.value = null
     await queryClient.invalidateQueries({ queryKey: ['tokens'] })
   },
@@ -119,6 +117,12 @@ function toggleRepository(id: string, checked: boolean) {
     ? [...new Set([...form.repository_ids, id])]
     : form.repository_ids.filter((item) => item !== id)
 }
+
+function toggleSpace(id: string, checked: boolean) {
+  form.space_ids = checked
+    ? [...new Set([...form.space_ids, id])]
+    : form.space_ids.filter((item) => item !== id)
+}
 </script>
 
 <template>
@@ -134,7 +138,7 @@ function toggleRepository(id: string, checked: boolean) {
           <span class="token-icon"><KeyRound :size="18" /></span>
           <div><strong>{{ token.name }}</strong><code>{{ token.prefix }}••••••••</code></div>
           <div class="scope-list"><span v-for="scope in token.scopes" :key="scope">{{ scope }}</span></div>
-          <span>{{ token.repository_ids.length ? `${token.repository_ids.length} repos` : 'public repos' }}</span>
+          <span>{{ token.space_ids.length }} spaces · {{ token.repository_ids.length ? `${token.repository_ids.length} repos` : 'public repos' }}</span>
           <span>{{ token.expires_at ? formatDate(token.expires_at) : formatDate(token.created_at) }}</span>
           <div class="token-actions">
             <button v-if="sessionTokens[token.id]" class="icon-button tooltip" type="button" data-tooltip="查看连接配置" aria-label="查看连接配置" @click="openConnectionDialog(token.id)"><Server :size="17" /></button>
@@ -164,6 +168,7 @@ function toggleRepository(id: string, checked: boolean) {
           <label><span>名称</span><input v-model="form.name" required /></label>
           <label><span>过期天数（可选）</span><input v-model.number="expiresInDays" type="number" min="1" max="365" placeholder="永不过期" /></label>
           <fieldset><legend>权限范围</legend><label v-for="scope in ['status', 'search', 'read']" :key="scope" class="check-row"><input type="checkbox" :checked="form.scopes.includes(scope)" @change="toggleScope(scope, ($event.target as HTMLInputElement).checked)" /><span>{{ scope }}</span></label></fieldset>
+          <fieldset><legend>知识空间范围</legend><label v-for="space in spaces.data.value" :key="space.id" class="check-row"><input type="checkbox" :checked="form.space_ids.includes(space.id)" @change="toggleSpace(space.id, ($event.target as HTMLInputElement).checked)" /><span>{{ space.name }}</span></label><small>未选择时使用当前账号可访问的全部知识空间</small></fieldset>
           <fieldset><legend>仓库范围</legend><label v-for="repo in repositories.data.value" :key="repo.id" class="check-row"><input type="checkbox" :checked="form.repository_ids.includes(repo.id)" @change="toggleRepository(repo.id, ($event.target as HTMLInputElement).checked)" /><span>{{ repo.name }}</span></label><small>未选择时仅允许公开仓库</small></fieldset>
           <div v-if="createToken.error.value" class="error-banner">{{ errorMessage(createToken.error.value) }}</div>
           <button class="command-button full-width" type="submit" :disabled="!form.name || !form.scopes.length || createToken.isPending.value">创建 Token</button>
@@ -200,12 +205,12 @@ function toggleRepository(id: string, checked: boolean) {
           </div>
           <pre><code>{{ installConfig }}</code></pre>
           <p v-if="installTarget === 'codex'" class="config-note">先在本机将 Token 保存为 <code>CODEATLAS_MCP_TOKEN</code> 环境变量，再执行该命令。请勿将 Token 明文写入 <code>config.toml</code>；完成后须完全退出并重新启动 Codex。</p>
-          <p v-else-if="installTarget === 'claude'" class="config-note">在终端执行该命令，然后使用 <code>claude mcp list</code> 检查连接。</p>
-          <p v-else class="config-note">适用于支持远程 HTTP MCP 和自定义请求头的客户端。</p>
+          <p v-else-if="installTarget === 'claude'" class="config-note">先设置 <code>CODEATLAS_MCP_TOKEN</code>，再执行该命令并使用 <code>claude mcp list</code> 检查连接。</p>
+          <p v-else class="config-note">配置使用 <code>CODEATLAS_MCP_TOKEN</code> 占位符；仅用于支持环境变量展开的客户端。</p>
         </div>
 
         <div v-if="!isSecureMcp" class="security-note critical"><KeyRound :size="16" /><span>当前服务使用 HTTP，Bearer Token 会以明文经过网络。公网生产环境必须先启用 HTTPS，再连接 Codex 或 Claude。</span></div>
-        <div v-else class="security-note"><KeyRound :size="16" /><span>配置包含访问凭据。当前页面会话内可从 Token 列表再次查看；刷新或离开页面后无法恢复。</span></div>
+        <div v-else class="security-note"><KeyRound :size="16" /><span>连接配置只引用环境变量。Token 仅在上方显示一次，刷新或离开页面后无法恢复。</span></div>
         <button class="command-button full-width" type="button" @click="closeConnectionDialog">我已保存配置</button>
       </section>
     </div>

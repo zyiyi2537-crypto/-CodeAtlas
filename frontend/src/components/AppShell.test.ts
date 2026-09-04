@@ -62,11 +62,12 @@ describe('AppShell', () => {
     })
     const destinations = wrapper.findAll('.sidebar .nav-item')
 
-    expect(destinations).toHaveLength(13)
+    expect(destinations).toHaveLength(14)
     expect(destinations.at(-1)?.text()).toContain('API Token')
     expect(wrapper.text()).toContain('GitLab 来源')
     expect(wrapper.text()).toContain('GitHub 来源')
     expect(wrapper.text()).toContain('外部知识源')
+    expect(wrapper.text()).toContain('公司工程规范')
   })
 
   it.each(['owner', 'workspace_admin'] as const)(
@@ -102,6 +103,40 @@ describe('AppShell', () => {
       expect(wrapper.text()).toContain('API Token')
     },
   )
+
+  it('gives members access to knowledge and personal token destinations', async () => {
+    const { state } = useAuth()
+    state.user = {
+      id: 'member-1',
+      email: 'member@example.com',
+      display_name: 'Member',
+      role: 'member',
+      is_active: true,
+      created_at: '2026-09-04T00:00:00Z',
+    }
+    state.csrfToken = 'test-csrf'
+    state.initialized = true
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', component: EmptyView },
+        { path: '/:pathMatch(.*)*', component: EmptyView },
+      ],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const wrapper = mount(AppShell, {
+      global: { plugins: [router] },
+    })
+
+    expect(wrapper.text()).toContain('仓库')
+    expect(wrapper.text()).toContain('公司工程规范')
+    expect(wrapper.text()).toContain('API Token')
+    expect(wrapper.text()).not.toContain('成员与权限')
+    expect(wrapper.text()).not.toContain('GitHub 来源')
+  })
 
   it('includes an anonymous login destination in the mobile navigation', async () => {
     const { state } = useAuth()
