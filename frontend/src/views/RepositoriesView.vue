@@ -87,7 +87,11 @@ function closeCreateDialog() {
     </div>
 
     <section class="data-section">
-      <div class="data-table-wrap" v-if="repositories.data.value?.length">
+      <div v-if="repositories.error.value" class="error-banner" data-query-error>
+        <span>{{ errorMessage(repositories.error.value) }}</span>
+        <button class="secondary-button" type="button" data-query-retry @click="repositories.refetch()">重试</button>
+      </div>
+      <div v-else-if="repositories.data.value?.length" class="data-table-wrap">
         <table class="data-table repository-table">
           <thead>
             <tr><th>仓库</th><th>状态</th><th>可见性</th><th>索引</th><th>提交</th><th>最近更新</th><th v-if="isAdmin"></th></tr>
@@ -133,10 +137,11 @@ function closeCreateDialog() {
           <label><span>可见性</span><select v-model="form.visibility"><option value="public">public</option><option value="private">private</option></select></label>
           <label><span>许可证</span><input v-model="form.license_name" placeholder="Apache-2.0" /></label>
           <label class="full-span"><span>许可证 URL</span><input v-model="form.license_url" type="url" /></label>
+          <div v-if="spaces.error.value" class="error-banner full-span" data-scope-error>{{ errorMessage(spaces.error.value) }}</div>
           <div v-if="formError" class="error-banner full-span">{{ formError }}</div>
           <div class="form-actions full-span">
             <button class="secondary-button" type="button" @click="closeCreateDialog">取消</button>
-            <button class="command-button" type="submit" :disabled="createRepository.isPending.value">创建仓库</button>
+            <button class="command-button" type="submit" :disabled="createRepository.isPending.value || !form.space_id || !!spaces.error.value">创建仓库</button>
           </div>
         </form>
       </section>

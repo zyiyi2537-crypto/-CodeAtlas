@@ -34,6 +34,32 @@ def test_resource_actions_are_evaluated_against_the_owning_space_role() -> None:
     assert not scope.permits_collection("viewer-docs", "generate")
 
 
+def test_resource_permissions_fail_closed_without_an_owning_space_mapping() -> None:
+    scope = AuthorizationScope(
+        actor_user_id="member-1",
+        space_ids=("space-1",),
+        repository_ids=("repo-without-map",),
+        collection_ids=("collection-without-map",),
+        actions=frozenset({"read", "search"}),
+        space_roles=(("space-1", "viewer"),),
+    )
+
+    assert not scope.permits_repository("repo-without-map", "read")
+    assert not scope.permits_collection("collection-without-map", "read")
+
+
+def test_space_permissions_fail_closed_without_a_role_mapping() -> None:
+    scope = AuthorizationScope(
+        actor_user_id="member-1",
+        space_ids=("space-without-role",),
+        repository_ids=(),
+        collection_ids=(),
+        actions=frozenset({"read", "search"}),
+    )
+
+    assert not scope.permits_space("space-without-role", "read")
+
+
 def test_convention_citation_requires_the_complete_source_range() -> None:
     repository = Repository(
         id="repo-1",

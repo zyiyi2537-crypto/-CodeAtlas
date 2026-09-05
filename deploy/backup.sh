@@ -4,27 +4,45 @@ set -euo pipefail
 DATA_DIR=${CODEATLAS_DATA_DIR:-/var/lib/codeatlas}
 APP_DIR=${CODEATLAS_APP_DIR:-/opt/codeatlas}
 BACKUP_DIR=${CODEATLAS_BACKUP_DIR:-/var/backups/codeatlas}
-STAMP=$(date -u +%Y%m%d-%H%M%S)
-STAGE="$BACKUP_DIR/.stage-$STAMP"
-ARCHIVE="$BACKUP_DIR/codeatlas-$STAMP.tar.gz"
+MAINTENANCE_LOCK=/run/lock/codeatlas-maintenance.lock
+STAMP=""
+BACKUP_ID=""
+STAGE=""
+ARCHIVE=""
 WAS_ACTIVE=false
 MYSQL_CNF=""
 MYSQL_DATABASE_FILE=""
-
-install -d -m 0750 "$BACKUP_DIR"
-install -d -m 0750 "$STAGE"
 
 cleanup() {
   if [[ "$WAS_ACTIVE" == true ]]; then
     systemctl start codeatlas
   fi
-  if [[ -d "$STAGE" ]]; then
-    rm -rf -- "$STAGE"
+  if [[ -n "$STAGE" && -d "$STAGE" ]]; then
+    rm -rf -- "${STAGE:?}"
   fi
   [[ -z "$MYSQL_CNF" ]] || rm -f -- "$MYSQL_CNF"
   [[ -z "$MYSQL_DATABASE_FILE" ]] || rm -f -- "$MYSQL_DATABASE_FILE"
 }
 trap cleanup EXIT
+
+if [[ ${CODEATLAS_MAINTENANCE_LOCK_HELD:-0} != 1 ]]; then
+  if ! command -v flock >/dev/null 2>&1; then
+    echo "Required backup command is missing: flock" >&2
+    exit 1
+  fi
+  exec 9>"$MAINTENANCE_LOCK"
+  if ! flock -n 9; then
+    echo "Another CodeAtlas maintenance operation is already running" >&2
+    exit 1
+  fi
+fi
+
+install -d -m 0750 "$BACKUP_DIR"
+STAMP=$(date -u +%Y%m%d-%H%M%S)
+STAGE=$(mktemp -d "$BACKUP_DIR/.stage-${STAMP}-XXXXXXXX")
+chmod 0750 "$STAGE"
+BACKUP_ID=${STAGE##*/.stage-}
+ARCHIVE="$BACKUP_DIR/codeatlas-$BACKUP_ID.tar.gz"
 
 if systemctl is-active --quiet codeatlas; then
   WAS_ACTIVE=true
@@ -32,6 +50,7 @@ if systemctl is-active --quiet codeatlas; then
 fi
 
 set -a
+# shellcheck disable=SC1091
 . /etc/codeatlas/codeatlas.env
 set +a
 MYSQL_CNF=$(mktemp "$BACKUP_DIR/.mysql-client.XXXXXX")

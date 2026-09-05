@@ -800,6 +800,76 @@ def test_mcp_tools_are_declared_read_only(monkeypatch) -> None:
         assert tool_annotations.openWorldHint is (name in open_world_tools)
 
 
+def test_mcp_search_only_scope_cannot_read_documents_or_global_counts(monkeypatch) -> None:
+    registered: dict[str, object] = {}
+
+    class FakeFastMCP:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def tool(self, **_kwargs):
+            def register(function):
+                registered[function.__name__] = function
+                return function
+
+            return register
+
+        def streamable_http_app(self):
+            return object()
+
+    class Retriever:
+        vector_store = type("Store", (), {"count": lambda self: 999_999})()
+
+        def allowed_repositories(self, *_args, **_kwargs):
+            return [
+                type(
+                    "Repository",
+                    (),
+                    {
+                        "id": "repo-1",
+                        "name": "Visible",
+                        "branch": "main",
+                        "last_commit": "a" * 40,
+                        "chunk_count": 7,
+                    },
+                )()
+            ]
+
+        def search_knowledge(self, *_args, **_kwargs):
+            return [{"source_type": "code", "content": "allowed"}]
+
+    monkeypatch.setattr(mcp_server, "FastMCP", FakeFastMCP)
+    mcp_server.build_mcp(
+        type(
+            "Settings",
+            (),
+            {"mcp_allowed_hosts": ("localhost",), "public_origin": "https://example.com"},
+        )(),
+        object(),
+        Retriever(),
+        default_identity=McpIdentity(
+            scopes=frozenset({"status", "search"}),
+            repository_ids=("repo-1",),
+            space_ids=("space-1",),
+            space_roles=(("space-1", "viewer"),),
+            repository_spaces=(("repo-1", "space-1"),),
+        ),
+        knowledge_search=object(),
+    )
+
+    index_status = registered["index_status"]
+    search_knowledge = registered["search_knowledge"]
+    assert callable(index_status) and callable(search_knowledge)
+    assert index_status()["vector_chunks"] == 7
+    assert search_knowledge("entrypoint", source_types=["code"]) == [
+        {"source_type": "code", "content": "allowed"}
+    ]
+    with pytest.raises(PermissionError, match="read"):
+        search_knowledge("private policy", source_types=["document"])
+    with pytest.raises(PermissionError, match="read"):
+        search_knowledge("private policy")
+
+
 def test_member_delete_waits_for_inflight_chat_turn(
     application, admin, monkeypatch
 ) -> None:

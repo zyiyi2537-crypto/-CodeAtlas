@@ -23,8 +23,9 @@ Chroma data are never imported into the public environment.
   query documents and Wiki pages, and retrieve source-backed engineering conventions.
 - **Multi-source ingestion**: GitHub, GitLab, uploaded documents, S3, COS, Notion, and
   Confluence are supported as code or read-only knowledge sources.
-- **Internal evaluation delivery**: GitHub Actions builds and deploys to a self-hosted
-  server with artifact verification, health checks, and release rollback.
+- **Protected evaluation delivery**: GitHub Actions verifies builds and tests without
+  production credentials; an independently authenticated, operator-approved maintenance
+  session performs the server release with backup, health checks, and rollback.
 
 Automatic code Wiki generation, interactive code maps, and guided tours are planned
 but are not shipped as current capabilities. See the

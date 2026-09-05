@@ -31,16 +31,14 @@ def _authorized_convention(
     authorization_scope: AuthorizationScope,
 ) -> dict | None:
     serialized = serialize_convention(convention)
-    citations = [
-        citation
-        for citation in serialized["citations"]
-        if authorization_scope.permits_repository(
+    citations = serialized["citations"]
+    if not citations or any(
+        not authorization_scope.permits_repository(
             str(citation.get("repository_id", ""))
         )
-    ]
-    if not citations:
+        for citation in citations
+    ):
         return None
-    serialized["citations"] = citations
     return serialized
 
 

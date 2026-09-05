@@ -92,7 +92,11 @@ function onFileChange(event: Event) {
     <div v-if="error" class="error-banner">{{ error }} <button class="icon-button" type="button" aria-label="关闭" @click="error = ''"><X :size="15" /></button></div>
     <section class="data-section">
       <div class="section-heading"><h2>文档集</h2><span>原文件保留，抽取内容用于检索</span></div>
-      <div v-if="collections.data.value?.length" class="source-card-grid">
+      <div v-if="collections.error.value" class="error-banner" data-query-error>
+        <span>{{ errorMessage(collections.error.value) }}</span>
+        <button class="secondary-button" type="button" data-query-retry @click="collections.refetch()">重试</button>
+      </div>
+      <div v-else-if="collections.data.value?.length" class="source-card-grid">
         <button v-for="collection in collections.data.value" :key="collection.id" class="source-card" :class="{ selected: selectedCollection === collection.id }" type="button" @click="selectedCollection = collection.id">
           <span class="source-card-icon"><FileText :size="19" /></span><span class="source-card-main"><strong>{{ collection.name }}</strong><small>{{ collection.description || '暂无描述' }}</small></span>
         </button>
@@ -101,11 +105,15 @@ function onFileChange(event: Event) {
     </section>
     <section v-if="selectedCollection" class="data-section">
       <div class="section-heading"><h2>已上传文档</h2><span>支持 Markdown、TXT、CSV、DOCX、XLSX、文本 PDF、PPTX</span></div>
-      <div v-if="documents.data.value?.length" class="gitlab-project-list">
+      <div v-if="documents.error.value" class="error-banner" data-document-error>
+        <span>{{ errorMessage(documents.error.value) }}</span>
+        <button class="secondary-button" type="button" @click="documents.refetch()">重试</button>
+      </div>
+      <div v-else-if="documents.data.value?.length" class="gitlab-project-list">
         <div v-for="document in documents.data.value" :key="document.id" class="gitlab-project-row"><FileText :size="18" /><span><strong>{{ document.title }}</strong><small>版本 {{ document.version }} · {{ document.chunk_count }} 个检索片段</small></span><span>{{ document.status }}</span></div>
       </div>
       <EmptyState v-else title="文档集为空" description="上传 Word、Excel、文本 PDF、PPT 或 Markdown 后，会按标题、表格、页、工作表和幻灯片结构建立语义索引。" />
     </section>
-    <div v-if="showCreate" class="preview-backdrop" role="presentation" @click.self="closeCreateDialog"><section v-modal-dialog="closeCreateDialog" class="form-dialog" role="dialog" aria-modal="true" aria-label="新建文档集"><header class="dialog-header"><h2>新建文档集</h2><button class="icon-button" type="button" aria-label="关闭" @click="closeCreateDialog"><X :size="18" /></button></header><form class="stack-form" @submit.prevent="createCollection.mutate()"><label><span>名称</span><input v-model="collectionName" required /></label><label><span>知识空间</span><select v-model="collectionSpaceId" required><option v-for="space in spaces.data.value" :key="space.id" :value="space.id">{{ space.name }}</option></select></label><label><span>描述</span><textarea v-model="collectionDescription" rows="3" /></label><div class="form-actions"><button class="secondary-button" type="button" @click="closeCreateDialog">取消</button><button class="command-button" type="submit">创建</button></div></form></section></div>
+    <div v-if="showCreate" class="preview-backdrop" role="presentation" @click.self="closeCreateDialog"><section v-modal-dialog="closeCreateDialog" class="form-dialog" role="dialog" aria-modal="true" aria-label="新建文档集"><header class="dialog-header"><h2>新建文档集</h2><button class="icon-button" type="button" aria-label="关闭" @click="closeCreateDialog"><X :size="18" /></button></header><form class="stack-form" @submit.prevent="createCollection.mutate()"><label><span>名称</span><input v-model="collectionName" required /></label><label><span>知识空间</span><select v-model="collectionSpaceId" required><option v-for="space in spaces.data.value" :key="space.id" :value="space.id">{{ space.name }}</option></select></label><label><span>描述</span><textarea v-model="collectionDescription" rows="3" /></label><div v-if="spaces.error.value" class="error-banner" data-scope-error>{{ errorMessage(spaces.error.value) }}</div><div class="form-actions"><button class="secondary-button" type="button" @click="closeCreateDialog">取消</button><button class="command-button" type="submit" :disabled="!collectionName || !collectionSpaceId || !!spaces.error.value || createCollection.isPending.value">创建</button></div></form></section></div>
   </div>
 </template>

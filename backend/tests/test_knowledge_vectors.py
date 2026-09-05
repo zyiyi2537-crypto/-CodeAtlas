@@ -4,7 +4,7 @@ from pathlib import Path
 
 from codeatlas.embeddings import EmbeddingClient
 from codeatlas.knowledge_search import KnowledgeSearch
-from codeatlas.models import WikiPage
+from codeatlas.models import DEFAULT_SPACE_ID, WikiPage
 from codeatlas.settings import Settings
 from codeatlas.vector_store import KnowledgeVectorChunk, VectorStore
 
@@ -86,6 +86,57 @@ def test_knowledge_chunks_share_profile_collection_with_source_filters(tmp_path:
 
     assert [item["metadata"]["source_type"] for item in document_results] == ["document"]
     assert document_results[0]["metadata"]["source_id"] == "doc-1"
+
+
+def test_legacy_knowledge_vectors_are_only_visible_in_the_default_space(
+    tmp_path: Path,
+) -> None:
+    settings = vector_settings(tmp_path)
+    store = VectorStore(settings, namespace="profile-a")
+    embedder = EmbeddingClient(settings)
+    store.add_knowledge(
+        [
+            KnowledgeVectorChunk(
+                id="legacy-wiki",
+                content="Legacy default-space knowledge.",
+                metadata={
+                    "source_type": "wiki",
+                    "source_id": "wiki-legacy",
+                    "collection_id": "",
+                    "title": "Legacy",
+                },
+            ),
+            KnowledgeVectorChunk(
+                id="restricted-wiki",
+                content="Legacy default-space knowledge.",
+                metadata={
+                    "source_type": "wiki",
+                    "source_id": "wiki-restricted",
+                    "collection_id": "",
+                    "space_id": "restricted-space",
+                    "title": "Restricted",
+                },
+            ),
+        ],
+        embedder,
+    )
+    query = embedder.embed(["Legacy default-space knowledge"])[0]
+
+    default_results = store.search_knowledge(
+        query,
+        source_types=["wiki"],
+        limit=5,
+        space_ids=[DEFAULT_SPACE_ID],
+    )
+    restricted_results = store.search_knowledge(
+        query,
+        source_types=["wiki"],
+        limit=5,
+        space_ids=["restricted-space"],
+    )
+
+    assert [item["id"] for item in default_results] == ["legacy-wiki"]
+    assert [item["id"] for item in restricted_results] == ["restricted-wiki"]
 
 
 class FakeEngine:

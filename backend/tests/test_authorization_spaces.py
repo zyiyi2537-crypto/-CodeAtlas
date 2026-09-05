@@ -134,6 +134,49 @@ def test_restricted_space_changes_all_resolved_resource_boundaries(
         assert not mixed_roles.permits_repository(default_repository_id, "edit")
 
 
+def test_anonymous_scope_excludes_public_repositories_in_restricted_spaces(
+    application,
+    admin: User,
+) -> None:
+    with Session(application.state.engine) as session:
+        restricted = KnowledgeSpace(
+            workspace_id="default-workspace",
+            name="Anonymous restricted",
+            visibility="restricted",
+        )
+        session.add(restricted)
+        session.flush()
+        workspace_public = Repository(
+            name="anonymous-workspace-public",
+            git_url="https://github.com/example/anonymous-workspace-public.git",
+            visibility="public",
+            created_by=admin.id,
+        )
+        restricted_public = Repository(
+            name="anonymous-restricted-public",
+            git_url="https://github.com/example/anonymous-restricted-public.git",
+            visibility="public",
+            space_id=restricted.id,
+            created_by=admin.id,
+        )
+        session.add_all([workspace_public, restricted_public])
+        session.commit()
+        workspace_public_id = workspace_public.id
+        restricted_public_id = restricted_public.id
+
+    with Session(application.state.engine) as session:
+        scope = resolve_authorization_scope(
+            session,
+            None,
+            allow_anonymous_repositories=True,
+        )
+
+    assert workspace_public_id in scope.repository_ids
+    assert scope.permits_repository(workspace_public_id, "read")
+    assert restricted_public_id not in scope.repository_ids
+    assert not scope.permits_repository(restricted_public_id, "read")
+
+
 def test_member_can_only_create_token_for_current_access_scope(
     client: TestClient,
     application,
@@ -311,6 +354,9 @@ def test_company_conventions_require_confirmed_status_and_repository_access(
             space_ids=scope.space_ids,
             collection_ids=scope.collection_ids,
             actor_user_id=member.id,
+            space_roles=scope.space_roles,
+            repository_spaces=scope.repository_spaces,
+            collection_spaces=scope.collection_spaces,
         ),
         knowledge_search=object(),
     )
@@ -319,3 +365,59 @@ def test_company_conventions_require_confirmed_status_and_repository_access(
     assert [item["title"] for item in get_conventions(language="typescript")] == [
         "Confirmed public rule"
     ]
+
+
+def test_company_convention_with_mixed_citations_is_not_partially_disclosed(
+    application,
+    admin: User,
+) -> None:
+    member = _add_member(application, "mixed-citations@example.com")
+    with Session(application.state.engine) as session:
+        public_repository = Repository(
+            name="mixed-citation-public",
+            git_url="https://github.com/example/mixed-citation-public.git",
+            visibility="public",
+            created_by=admin.id,
+        )
+        private_repository = Repository(
+            name="mixed-citation-private",
+            git_url="https://github.com/example/mixed-citation-private.git",
+            visibility="private",
+            created_by=admin.id,
+        )
+        session.add_all([public_repository, private_repository])
+        session.flush()
+        session.add(
+            CompanyConvention(
+                title="Mixed private-derived rule",
+                category="security",
+                rule="Never reveal the private implementation detail.",
+                citations_json=json.dumps(
+                    [
+                        {
+                            "repository_id": public_repository.id,
+                            "commit": "a" * 40,
+                            "path": "src/public.py",
+                            "start_line": 1,
+                            "end_line": 2,
+                        },
+                        {
+                            "repository_id": private_repository.id,
+                            "commit": "b" * 40,
+                            "path": "src/private.py",
+                            "start_line": 1,
+                            "end_line": 2,
+                        },
+                    ]
+                ),
+                status="confirmed",
+                created_by=admin.id,
+            )
+        )
+        session.commit()
+
+    with Session(application.state.engine) as session:
+        stored_member = session.get(User, member.id)
+        assert stored_member is not None
+        scope = resolve_authorization_scope(session, stored_member)
+        assert find_company_conventions(session, scope) == []

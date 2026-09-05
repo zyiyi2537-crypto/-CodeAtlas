@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 SOURCE_ROOT=${1:-/root/codeatlas-release}
 ENV_FILE=/etc/codeatlas/codeatlas.env
+BACKUP_SCRIPT="$SOURCE_ROOT/deploy/backup.sh"
+MAINTENANCE_LOCK=/run/lock/codeatlas-maintenance.lock
 REVISION_ENV_FILE=/etc/codeatlas/revision.env
 NGINX_TARGET=/etc/nginx/conf.d/codeatlas.conf
 NGINX_DEFAULT=/etc/nginx/conf.d/default.conf
@@ -16,6 +18,17 @@ WEB_PREVIOUS=/var/www/codeatlas.previous
 PYTHON_BIN=${CODEATLAS_PYTHON_BIN:-python3.12}
 NGINX_CANDIDATE=""
 NGINX_PREFLIGHT=""
+BACKUP_ARCHIVE=""
+RESTORE_STAGE=""
+COMPILE_CACHE=""
+DB_REVISION_BEFORE=""
+DB_TARGET_REVISION=""
+MYSQL_DATABASE=""
+MIGRATION_STARTED=false
+MIGRATION_COMPLETED=false
+MUTABLE_STATE_TOUCHED=false
+PUBLIC_EXPOSED=false
+TRANSACTION_ACTIVE=false
 
 cleanup() {
   if [[ -n "$NGINX_CANDIDATE" ]]; then
@@ -23,6 +36,12 @@ cleanup() {
   fi
   if [[ -n "$NGINX_PREFLIGHT" ]]; then
     rm -f -- "$NGINX_PREFLIGHT"
+  fi
+  if [[ -n "$RESTORE_STAGE" && -d "$RESTORE_STAGE" ]]; then
+    rm -rf -- "$RESTORE_STAGE"
+  fi
+  if [[ -n "$COMPILE_CACHE" && -d "$COMPILE_CACHE" ]]; then
+    rm -rf -- "${COMPILE_CACHE:?}"
   fi
 }
 trap cleanup EXIT
@@ -39,6 +58,10 @@ if [[ ! -f "$SOURCE_ROOT/deploy/validate_nginx.py" ]]; then
   echo "Release directory has no Nginx safety validator" >&2
   exit 1
 fi
+if [[ ! -x "$BACKUP_SCRIPT" ]]; then
+  echo "Release directory has no executable backup helper" >&2
+  exit 1
+fi
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
   echo "Python 3.11 or newer is required: $PYTHON_BIN" >&2
   exit 1
@@ -48,6 +71,19 @@ if ! "$PYTHON_BIN" -c \
   echo "Python 3.11 or newer is required: $PYTHON_BIN" >&2
   exit 1
 fi
+for required_command in nginx rsync git mysql mysqldump sha256sum tar runuser flock; do
+  if ! command -v "$required_command" >/dev/null 2>&1; then
+    echo "Required deployment command is missing: $required_command" >&2
+    exit 1
+  fi
+done
+
+exec 9>"$MAINTENANCE_LOCK"
+if ! flock -n 9; then
+  echo "Another CodeAtlas maintenance operation is already running" >&2
+  exit 1
+fi
+export CODEATLAS_MAINTENANCE_LOCK_HELD=1
 
 if ! id codeatlas >/dev/null 2>&1; then
   useradd --system --home-dir /var/lib/codeatlas --shell /sbin/nologin codeatlas
@@ -68,7 +104,7 @@ if ! grep -q '^CODEATLAS_DATABASE_URL=mysql+' "$ENV_FILE" || \
 fi
 
 set -a
-# shellcheck disable=SC1091
+# shellcheck disable=SC1090
 . "$ENV_FILE"
 set +a
 
@@ -116,9 +152,6 @@ if [[ ! -s "$CERT_DIR/fullchain.pem" || ! -s "$CERT_DIR/privkey.pem" ]]; then
   echo "TLS certificate files are missing under $CERT_DIR" >&2
   exit 1
 fi
-
-dnf module enable -y nginx:mainline
-dnf install -y --disableexcludes=all --allowerasing nginx rsync git mysql mysql-server
 
 # Build and validate the candidate before copying code or applying migrations.
 NGINX_CANDIDATE=$(mktemp /tmp/codeatlas-nginx.XXXXXX.conf)
@@ -225,20 +258,18 @@ else
   CODEATLAS_ENABLED_STATE=absent
 fi
 
-MYSQL_CONFIG_CHANGED=false
-if [[ ! -f /etc/my.cnf.d/codeatlas.cnf ]] || \
-   ! cmp -s "$SOURCE_ROOT/deploy/mysql-codeatlas.cnf" /etc/my.cnf.d/codeatlas.cnf; then
-  install -m 0644 "$SOURCE_ROOT/deploy/mysql-codeatlas.cnf" /etc/my.cnf.d/codeatlas.cnf
-  MYSQL_CONFIG_CHANGED=true
-fi
-systemctl enable --now mysqld
-if [[ "$MYSQL_CONFIG_CHANGED" == true ]]; then
-  systemctl restart mysqld
-fi
+MYSQL_LOAD_STATE=$(capture_load_state mysqld) || exit 1
+MYSQL_ACTIVE_STATE=$(capture_active_state mysqld) || exit 1
+[[ "$MYSQL_LOAD_STATE" == loaded && "$MYSQL_ACTIVE_STATE" == active ]] || {
+  echo "The existing MySQL service must be loaded and active" >&2
+  exit 1
+}
 
 install -d -m 0755 /opt/codeatlas /var/www
 install -d -m 0755 /opt/codeatlas/blog/src/content
 install -d -o codeatlas -g codeatlas -m 0750 /var/lib/codeatlas
+DATA_DIR=${CODEATLAS_DATA_DIR:-/var/lib/codeatlas}
+BLOG_CONTENT_TARGET=/opt/codeatlas/blog/src/content
 
 rm -rf -- "$BACKEND_CANDIDATE" "$WEB_CANDIDATE"
 install -d -m 0755 "$BACKEND_CANDIDATE" "$WEB_CANDIDATE"
@@ -247,19 +278,79 @@ rsync -a --delete \
   --exclude '.venv' --exclude 'data' --exclude '.pytest-tmp' \
   "$SOURCE_ROOT/backend/" "$BACKEND_CANDIDATE/"
 rsync -a --delete "$SOURCE_ROOT/blog-dist/" "$WEB_CANDIDATE/"
-if [[ -d "$SOURCE_ROOT/blog-content" ]]; then
-  rsync -a --delete "$SOURCE_ROOT/blog-content/" /opt/codeatlas/blog/src/content/
-fi
 install -d -m 0755 "$WEB_CANDIDATE/lab/code-kb"
 rsync -a --delete "$SOURCE_ROOT/frontend-dist/" "$WEB_CANDIDATE/lab/code-kb/"
 
-"$PYTHON_BIN" -m venv "$BACKEND_CANDIDATE/.venv"
-"$BACKEND_CANDIDATE/.venv/bin/pip" install --upgrade pip wheel
-"$BACKEND_CANDIDATE/.venv/bin/pip" install "$BACKEND_CANDIDATE"
-(
-  cd "$BACKEND_CANDIDATE"
-  .venv/bin/python -m alembic -c alembic.ini upgrade head
+cmp -s "$BACKEND_TARGET/pyproject.toml" "$BACKEND_CANDIDATE/pyproject.toml" || {
+  echo "Backend dependency manifest changed; perform a protected dependency release" >&2
+  exit 1
+}
+cmp -s "$BACKEND_TARGET/uv.lock" "$BACKEND_CANDIDATE/uv.lock" || {
+  echo "Backend dependency lock changed; perform a protected dependency release" >&2
+  exit 1
+}
+rsync -a "$BACKEND_TARGET/.venv/" "$BACKEND_CANDIDATE/.venv/"
+COMPILE_CACHE=$(mktemp -d /var/tmp/codeatlas-compile.XXXXXXXX)
+chmod 0700 "$COMPILE_CACHE"
+"$PYTHON_BIN" -I -S -X pycache_prefix="$COMPILE_CACHE" -m compileall -q \
+  "$BACKEND_CANDIDATE/codeatlas" "$BACKEND_CANDIDATE/alembic"
+rm -rf -- "${COMPILE_CACHE:?}"
+COMPILE_CACHE=""
+MYSQL_DATABASE=$(PYTHONPATH='' PYTHONHOME='' \
+  "$BACKEND_CANDIDATE/.venv/bin/python" - <<'PY'
+import os
+import re
+
+from sqlalchemy.engine import make_url
+
+database = make_url(os.environ["CODEATLAS_DATABASE_URL"]).database or ""
+if re.fullmatch(r"[A-Za-z0-9_]+", database) is None:
+    raise SystemExit("CodeAtlas MySQL database name is not safe")
+print(database)
+PY
 )
+DB_TARGET_REVISION=$("$PYTHON_BIN" -I -S - "$BACKEND_CANDIDATE/alembic/versions" <<'PY'
+import ast
+import sys
+from pathlib import Path
+
+versions = Path(sys.argv[1])
+revisions: dict[str, str | None] = {}
+for migration in sorted(versions.glob("*.py")):
+    tree = ast.parse(migration.read_text(encoding="utf-8"), filename=str(migration))
+    values: dict[str, str | None] = {}
+    for node in tree.body:
+        target: ast.expr | None = None
+        value: ast.expr | None = None
+        if isinstance(node, ast.AnnAssign):
+            target = node.target
+            value = node.value
+        elif isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            value = node.value
+        if not isinstance(target, ast.Name):
+            continue
+        if target.id not in {"revision", "down_revision"}:
+            continue
+        if isinstance(value, ast.Constant) and (
+            isinstance(value.value, str) or value.value is None
+        ):
+            values[target.id] = value.value
+    revision = values.get("revision")
+    if not isinstance(revision, str) or revision in revisions:
+        raise SystemExit("Migration revision graph is invalid")
+    revisions[revision] = values.get("down_revision")
+parents = {parent for parent in revisions.values() if parent is not None}
+heads = sorted(set(revisions) - parents)
+if len(heads) != 1:
+    raise SystemExit("Migration graph must contain exactly one head")
+print(heads[0])
+PY
+)
+if [[ ! "$DB_TARGET_REVISION" =~ ^[A-Za-z0-9_]+$ ]]; then
+  echo "Cannot determine the target database revision" >&2
+  exit 1
+fi
 
 install -d -m 0700 /var/backups/codeatlas
 NGINX_BACKUP_DIR=$(mktemp -d /var/backups/codeatlas/nginx-install-XXXXXXXX)
@@ -283,10 +374,6 @@ if [[ -f "$REVISION_ENV_FILE" ]]; then
   install -m 0640 "$REVISION_ENV_FILE" "$NGINX_BACKUP_DIR/revision.env"
   REVISION_ENV_EXISTED=true
 fi
-
-printf 'CODEATLAS_BUILD_REVISION=%s\n' "$BUILD_REVISION" > "$REVISION_ENV_FILE"
-chown root:codeatlas "$REVISION_ENV_FILE"
-chmod 0640 "$REVISION_ENV_FILE"
 
 verify_active_state() {
   local unit=$1
@@ -398,9 +485,96 @@ restore_release() {
   return "$failed"
 }
 
+ensure_restore_stage() {
+  if [[ -n "$RESTORE_STAGE" ]]; then
+    [[ -d "$RESTORE_STAGE" && ! -L "$RESTORE_STAGE" && \
+       -f "$RESTORE_STAGE/codeatlas.sql" && \
+       ! -L "$RESTORE_STAGE/codeatlas.sql" ]] || return 1
+    return 0
+  fi
+  [[ -n "$BACKUP_ARCHIVE" && -f "$BACKUP_ARCHIVE" && \
+     ! -L "$BACKUP_ARCHIVE" ]] || return 1
+  [[ -f "$BACKUP_ARCHIVE.sha256" && \
+     ! -L "$BACKUP_ARCHIVE.sha256" ]] || return 1
+  sha256sum -c "$BACKUP_ARCHIVE.sha256" >/dev/null || return 1
+  local restore_candidate
+  restore_candidate=$(mktemp -d /var/backups/codeatlas/restore-XXXXXXXX) \
+    || return 1
+  chmod 0700 "$restore_candidate" || {
+    rm -rf -- "${restore_candidate:?}"
+    return 1
+  }
+  tar -C "$restore_candidate" -xzf "$BACKUP_ARCHIVE" || {
+    rm -rf -- "${restore_candidate:?}"
+    return 1
+  }
+  [[ -f "$restore_candidate/codeatlas.sql" && \
+     ! -L "$restore_candidate/codeatlas.sql" ]] || {
+    rm -rf -- "${restore_candidate:?}"
+    return 1
+  }
+  RESTORE_STAGE=$restore_candidate
+  return 0
+}
+
+rollback_database() {
+  if [[ "$MIGRATION_STARTED" != true ]]; then
+    return 0
+  fi
+  ensure_restore_stage || return 1
+  mysql --protocol=socket --user=root <<SQL || return 1
+DROP DATABASE IF EXISTS \`$MYSQL_DATABASE\`;
+CREATE DATABASE \`$MYSQL_DATABASE\`
+  CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+SQL
+  mysql --protocol=socket --user=root "$MYSQL_DATABASE" \
+    < "$RESTORE_STAGE/codeatlas.sql" || return 1
+  local restored_revision
+  restored_revision=$(mysql --protocol=socket --user=root \
+    --batch --skip-column-names "$MYSQL_DATABASE" \
+    -e 'SELECT version_num FROM alembic_version') || return 1
+  [[ "$restored_revision" == "$DB_REVISION_BEFORE" ]] || return 1
+  printf 'DATABASE_ROLLBACK=PASSED from=%s completed=%s\n' \
+    "$DB_TARGET_REVISION" "$MIGRATION_COMPLETED" >&2 || return 1
+  return 0
+}
+
+restore_mutable_state() {
+  if [[ "$MUTABLE_STATE_TOUCHED" != true ]]; then
+    return 0
+  fi
+  ensure_restore_stage || return 1
+  local failed=0
+  local name
+  for name in chroma documents; do
+    rm -rf -- "${DATA_DIR:?}/$name" || failed=1
+    if [[ -d "$RESTORE_STAGE/$name" && ! -L "$RESTORE_STAGE/$name" ]]; then
+      cp -a -- "$RESTORE_STAGE/$name" "$DATA_DIR/$name" || failed=1
+      chown -R codeatlas:codeatlas "$DATA_DIR/$name" || failed=1
+    fi
+  done
+  rm -rf -- "$BLOG_CONTENT_TARGET" || failed=1
+  if [[ -d "$RESTORE_STAGE/blog/content" && \
+        ! -L "$RESTORE_STAGE/blog/content" ]]; then
+    install -d -m 0755 "$(dirname "$BLOG_CONTENT_TARGET")" || failed=1
+    cp -a -- "$RESTORE_STAGE/blog/content" "$BLOG_CONTENT_TARGET" || failed=1
+  fi
+  return "$failed"
+}
+
 rollback_nginx() {
   local failed=0
   local current_codeatlas_load=""
+  systemctl stop nginx >/dev/null 2>&1 || failed=1
+  if [[ $(capture_load_state codeatlas 2>/dev/null || true) == loaded ]]; then
+    systemctl stop codeatlas >/dev/null 2>&1 || failed=1
+  fi
+  if ! rollback_database; then
+    failed=1
+  fi
+  if ! restore_mutable_state; then
+    failed=1
+  fi
   if ! restore_release; then
     failed=1
   fi
@@ -420,16 +594,27 @@ rollback_nginx() {
   if ! systemctl daemon-reload; then
     failed=1
   fi
-  if [[ "$NGINX_ACTIVE_STATE" == active ]]; then
+  if [[ "$CODEATLAS_ACTIVE_STATE" == active ]]; then
+    if ! systemctl restart codeatlas; then failed=1; fi
+    local old_backend_healthy=false
+    local _attempt
+    for _attempt in $(seq 1 30); do
+      if curl --fail --silent http://127.0.0.1:8010/api/v1/health >/dev/null; then
+        old_backend_healthy=true
+        break
+      fi
+      sleep 1
+    done
+    if [[ "$old_backend_healthy" != true ]]; then
+      failed=1
+    fi
+  elif [[ "$CODEATLAS_ENABLED_STATE" != absent ]]; then
+    if ! systemctl stop codeatlas; then failed=1; fi
+  fi
+  if [[ "$NGINX_ACTIVE_STATE" == active && $failed -eq 0 ]]; then
     if ! nginx -t || ! systemctl restart nginx; then failed=1; fi
   else
     if ! systemctl stop nginx; then failed=1; fi
-  fi
-  if ! verify_active_state nginx "$NGINX_ACTIVE_STATE"; then failed=1; fi
-  if [[ "$CODEATLAS_ACTIVE_STATE" == active ]]; then
-    if ! systemctl restart codeatlas; then failed=1; fi
-  elif [[ "$CODEATLAS_ENABLED_STATE" != absent ]]; then
-    if ! systemctl stop codeatlas; then failed=1; fi
   fi
   case "$NGINX_ENABLED_STATE" in
     enabled) if ! systemctl enable nginx; then failed=1; fi ;;
@@ -457,6 +642,11 @@ rollback_nginx() {
 
 fail_nginx_switch() {
   local message=$1
+  trap - ERR HUP INT TERM
+  TRANSACTION_ACTIVE=false
+  if [[ "$PUBLIC_EXPOSED" == true ]]; then
+    fail_public_switch "$message"
+  fi
   if ! rollback_nginx; then
     echo "$message; ROLLBACK FAILED, inspect $NGINX_BACKUP_DIR immediately" >&2
     exit 2
@@ -464,6 +654,86 @@ fail_nginx_switch() {
   echo "$message; previous service and Nginx state restored from $NGINX_BACKUP_DIR" >&2
   exit 1
 }
+
+fail_public_switch() {
+  local message=$1
+  trap - ERR HUP INT TERM
+  TRANSACTION_ACTIVE=false
+  systemctl stop nginx >/dev/null 2>&1 || true
+  echo "$message; public ingress is closed and the new state is retained for review" >&2
+  exit 2
+}
+
+handle_unexpected_error() {
+  local status=$?
+  if (( BASH_SUBSHELL > 0 )); then
+    exit "$status"
+  fi
+  trap - ERR HUP INT TERM
+  if [[ "$TRANSACTION_ACTIVE" != true ]]; then
+    exit "$status"
+  fi
+  TRANSACTION_ACTIVE=false
+  if [[ "$PUBLIC_EXPOSED" == true ]]; then
+    systemctl stop nginx >/dev/null 2>&1 || true
+    echo "Unexpected release error after public exposure; ingress is closed" >&2
+    exit 2
+  fi
+  if ! rollback_nginx; then
+    echo "Unexpected release error; ROLLBACK FAILED, inspect $NGINX_BACKUP_DIR" >&2
+    exit 2
+  fi
+  echo "Unexpected release error; previous state restored" >&2
+  exit "$status"
+}
+
+handle_signal() {
+  local signal=$1
+  trap - ERR HUP INT TERM
+  if [[ "$TRANSACTION_ACTIVE" != true ]]; then
+    exit 128
+  fi
+  TRANSACTION_ACTIVE=false
+  if [[ "$PUBLIC_EXPOSED" == true ]]; then
+    systemctl stop nginx >/dev/null 2>&1 || true
+    echo "Release interrupted by $signal after public exposure; ingress is closed" >&2
+    exit 2
+  fi
+  if ! rollback_nginx; then
+    echo "Release interrupted by $signal; ROLLBACK FAILED, inspect $NGINX_BACKUP_DIR" >&2
+    exit 2
+  fi
+  echo "Release interrupted by $signal; previous state restored" >&2
+  exit 1
+}
+
+trap 'handle_unexpected_error' ERR
+trap 'handle_signal HUP' HUP
+trap 'handle_signal INT' INT
+trap 'handle_signal TERM' TERM
+TRANSACTION_ACTIVE=true
+systemctl stop nginx || fail_nginx_switch "Nginx stop failed"
+systemctl stop codeatlas || fail_nginx_switch "CodeAtlas stop failed"
+verify_active_state nginx inactive || fail_nginx_switch "Nginx did not stop cleanly"
+verify_active_state codeatlas inactive || fail_nginx_switch "CodeAtlas did not stop cleanly"
+
+DB_REVISION_BEFORE=$(
+  cd "$BACKEND_TARGET"
+  runuser --user codeatlas --preserve-environment -- \
+    .venv/bin/python -m alembic -c alembic.ini current | awk 'NR == 1 {print $1}'
+) || fail_nginx_switch "Cannot determine the current database revision"
+if [[ ! "$DB_REVISION_BEFORE" =~ ^[A-Za-z0-9_]+$ ]]; then
+  fail_nginx_switch "Cannot determine the current database revision"
+fi
+BACKUP_ARCHIVE=$("$BACKUP_SCRIPT") \
+  || fail_nginx_switch "Quiesced production backup failed"
+if [[ ! "$BACKUP_ARCHIVE" =~ ^/var/backups/codeatlas/codeatlas-[0-9]{8}-[0-9]{6}-[A-Za-z0-9]{8}\.tar\.gz$ || \
+      ! -f "$BACKUP_ARCHIVE" || -L "$BACKUP_ARCHIVE" || \
+      ! -f "$BACKUP_ARCHIVE.sha256" || -L "$BACKUP_ARCHIVE.sha256" ]]; then
+  fail_nginx_switch "Backup helper returned an unsafe archive path"
+fi
+sha256sum -c "$BACKUP_ARCHIVE.sha256" >/dev/null \
+  || fail_nginx_switch "Production backup checksum validation failed"
 
 install -m 0644 "$SOURCE_ROOT/deploy/codeatlas.service" "$CODEATLAS_SERVICE" \
   || fail_nginx_switch "Service unit installation failed"
@@ -473,18 +743,61 @@ rm -f -- "$NGINX_DEFAULT" || fail_nginx_switch "Default Nginx removal failed"
 nginx -t || fail_nginx_switch "Nginx candidate validation failed"
 switch_release || fail_nginx_switch "Release switch failed"
 
+printf 'CODEATLAS_BUILD_REVISION=%s\n' "$BUILD_REVISION" > "$REVISION_ENV_FILE" \
+  || fail_nginx_switch "Revision marker write failed"
+chown root:codeatlas "$REVISION_ENV_FILE" \
+  || fail_nginx_switch "Revision marker ownership update failed"
+chmod 0640 "$REVISION_ENV_FILE" \
+  || fail_nginx_switch "Revision marker permission update failed"
+
+MUTABLE_STATE_TOUCHED=true
+if [[ -d "$SOURCE_ROOT/blog-content" ]]; then
+  rsync -a --delete "$SOURCE_ROOT/blog-content/" "$BLOG_CONTENT_TARGET/" \
+    || fail_nginx_switch "Blog source synchronization failed"
+fi
+
+MIGRATION_STARTED=true
+if ! (
+  cd "$BACKEND_TARGET"
+  runuser --user codeatlas --preserve-environment -- \
+    .venv/bin/python -m alembic -c alembic.ini upgrade head
+); then
+  fail_nginx_switch "Database migration failed"
+fi
+DB_REVISION_AFTER=$(
+  cd "$BACKEND_TARGET"
+  runuser --user codeatlas --preserve-environment -- \
+    .venv/bin/python -m alembic -c alembic.ini current | awk 'NR == 1 {print $1}'
+) || fail_nginx_switch "Database revision verification failed"
+if [[ "$DB_REVISION_AFTER" != "$DB_TARGET_REVISION" ]]; then
+  fail_nginx_switch "Database did not reach the target revision"
+fi
+MIGRATION_COMPLETED=true
+
 systemctl daemon-reload || fail_nginx_switch "systemd daemon reload failed"
 systemctl enable nginx codeatlas || fail_nginx_switch "Service enable failed"
 systemctl restart codeatlas || fail_nginx_switch "CodeAtlas restart failed"
-if [[ "$NGINX_ACTIVE_STATE" == active ]]; then
-  systemctl reload nginx || fail_nginx_switch "Nginx reload failed"
-else
-  systemctl start nginx || fail_nginx_switch "Nginx start failed"
-fi
 
 wait_for_local_health() {
   for _attempt in $(seq 1 30); do
-    if curl --fail --silent http://127.0.0.1:8010/api/v1/health >/dev/null; then
+    local response
+    response=$(curl --fail --silent http://127.0.0.1:8010/api/v1/health) || {
+      sleep 1
+      continue
+    }
+    if BUILD_REVISION="$BUILD_REVISION" "$PYTHON_BIN" -c \
+      'import json, os, sys; assert json.load(sys.stdin)["revision"] == os.environ["BUILD_REVISION"]' \
+      <<< "$response"; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+wait_for_local_ready() {
+  for _attempt in $(seq 1 30); do
+    if curl --fail --silent http://127.0.0.1:8010/api/v1/ready >/dev/null; then
       return 0
     fi
     sleep 1
@@ -494,8 +807,16 @@ wait_for_local_health() {
 
 wait_for_https_health() {
   for _attempt in $(seq 1 30); do
-    if curl --fail --silent --resolve "$CODEATLAS_DOMAIN:443:127.0.0.1" \
-      "https://$CODEATLAS_DOMAIN/api/code-kb/health" >/dev/null; then
+    local response
+    response=$(curl --fail --silent \
+      --resolve "$CODEATLAS_DOMAIN:443:127.0.0.1" \
+      "https://$CODEATLAS_DOMAIN/api/code-kb/health") || {
+      sleep 1
+      continue
+    }
+    if BUILD_REVISION="$BUILD_REVISION" "$PYTHON_BIN" -c \
+      'import json, os, sys; assert json.load(sys.stdin)["revision"] == os.environ["BUILD_REVISION"]' \
+      <<< "$response"; then
       return 0
     fi
     sleep 1
@@ -504,7 +825,34 @@ wait_for_https_health() {
 }
 
 wait_for_local_health || fail_nginx_switch "Local CodeAtlas health check failed"
-wait_for_https_health || fail_nginx_switch "HTTPS CodeAtlas health check failed"
+wait_for_local_ready || fail_nginx_switch "Local CodeAtlas readiness check failed"
+[[ -f "$WEB_TARGET/index.html" && ! -L "$WEB_TARGET/index.html" ]] \
+  || fail_nginx_switch "Blog index is missing"
+[[ -f "$WEB_TARGET/lab/code-kb/index.html" && \
+   ! -L "$WEB_TARGET/lab/code-kb/index.html" ]] \
+  || fail_nginx_switch "Frontend index is missing"
+nginx -t || fail_nginx_switch "Nginx validation before exposure failed"
+
+PUBLIC_EXPOSED=true
+systemctl start nginx || fail_public_switch "Nginx start failed"
+wait_for_https_health || fail_public_switch "HTTPS CodeAtlas health check failed"
+curl --fail --silent --resolve "$CODEATLAS_DOMAIN:443:127.0.0.1" \
+  "https://$CODEATLAS_DOMAIN/api/code-kb/ready" >/dev/null \
+  || fail_public_switch "HTTPS CodeAtlas readiness check failed"
+curl --fail --silent --resolve "$CODEATLAS_DOMAIN:443:127.0.0.1" \
+  "https://$CODEATLAS_DOMAIN/" >/dev/null \
+  || fail_public_switch "Public blog check failed"
+curl --fail --silent --resolve "$CODEATLAS_DOMAIN:443:127.0.0.1" \
+  "https://$CODEATLAS_DOMAIN/lab/code-kb/" >/dev/null \
+  || fail_public_switch "Public frontend check failed"
+MCP_STATUS=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  --resolve "$CODEATLAS_DOMAIN:443:127.0.0.1" \
+  "https://$CODEATLAS_DOMAIN/mcp") \
+  || fail_public_switch "Anonymous MCP connectivity check failed"
+[[ "$MCP_STATUS" == 401 ]] || fail_public_switch "Anonymous MCP check failed"
+TRANSACTION_ACTIVE=false
+trap - ERR HUP INT TERM
 
 echo "CodeAtlas is running at https://$CODEATLAS_DOMAIN without an IP allowlist"
+echo "Verified rollback backup: $BACKUP_ARCHIVE"
 echo "Previous Nginx files are retained under $NGINX_BACKUP_DIR"

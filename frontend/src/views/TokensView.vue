@@ -133,7 +133,11 @@ function toggleSpace(id: string, checked: boolean) {
     </section>
 
     <section class="data-section">
-      <div v-if="activeTokens.length" class="token-list">
+      <div v-if="tokens.error.value" class="error-banner" data-query-error>
+        <span>{{ errorMessage(tokens.error.value) }}</span>
+        <button class="secondary-button" type="button" data-query-retry @click="tokens.refetch()">重试</button>
+      </div>
+      <div v-else-if="activeTokens.length" class="token-list">
         <article v-for="token in activeTokens" :key="token.id" class="token-row">
           <span class="token-icon"><KeyRound :size="18" /></span>
           <div><strong>{{ token.name }}</strong><code>{{ token.prefix }}••••••••</code></div>
@@ -170,8 +174,9 @@ function toggleSpace(id: string, checked: boolean) {
           <fieldset><legend>权限范围</legend><label v-for="scope in ['status', 'search', 'read']" :key="scope" class="check-row"><input type="checkbox" :checked="form.scopes.includes(scope)" @change="toggleScope(scope, ($event.target as HTMLInputElement).checked)" /><span>{{ scope }}</span></label></fieldset>
           <fieldset><legend>知识空间范围</legend><label v-for="space in spaces.data.value" :key="space.id" class="check-row"><input type="checkbox" :checked="form.space_ids.includes(space.id)" @change="toggleSpace(space.id, ($event.target as HTMLInputElement).checked)" /><span>{{ space.name }}</span></label><small>未选择时使用当前账号可访问的全部知识空间</small></fieldset>
           <fieldset><legend>仓库范围</legend><label v-for="repo in repositories.data.value" :key="repo.id" class="check-row"><input type="checkbox" :checked="form.repository_ids.includes(repo.id)" @change="toggleRepository(repo.id, ($event.target as HTMLInputElement).checked)" /><span>{{ repo.name }}</span></label><small>未选择时仅允许公开仓库</small></fieldset>
+          <div v-if="spaces.error.value || repositories.error.value" class="error-banner" data-scope-error>{{ errorMessage(spaces.error.value || repositories.error.value) }}</div>
           <div v-if="createToken.error.value" class="error-banner">{{ errorMessage(createToken.error.value) }}</div>
-          <button class="command-button full-width" type="submit" :disabled="!form.name || !form.scopes.length || createToken.isPending.value">创建 Token</button>
+          <button class="command-button full-width" type="submit" :disabled="!form.name || !form.scopes.length || createToken.isPending.value || !!spaces.error.value || !!repositories.error.value">创建 Token</button>
         </form>
       </section>
     </div>

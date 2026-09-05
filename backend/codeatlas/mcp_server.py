@@ -193,9 +193,10 @@ def build_mcp(
     @mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
     def index_status() -> dict:
         """Return public repository and index status."""
+        repositories = list_repositories()
         return {
-            "repositories": list_repositories(),
-            "vector_chunks": retriever.vector_store.count(),
+            "repositories": repositories,
+            "vector_chunks": sum(int(repository["chunks"]) for repository in repositories),
         }
 
     @mcp.tool(annotations=OPEN_WORLD_READ_ONLY_TOOL_ANNOTATIONS)
@@ -320,6 +321,10 @@ def build_mcp(
     ) -> list[dict]:
         """Search code, structured documents and Wiki pages in one cited result set."""
         current = identity("search")
+        wanted = source_types or ["code", "document", "wiki"]
+        if any(source_type in {"document", "wiki"} for source_type in wanted):
+            if "read" not in current.scopes:
+                raise PermissionError("MCP token requires the read scope")
         if repository and repository not in current.repository_ids:
             raise PermissionError("repository is outside this token scope")
         if collection and collection not in current.collection_ids:
@@ -328,7 +333,7 @@ def build_mcp(
             query,
             repository_ids=[repository] if repository else None,
             collection_ids=[collection] if collection else None,
-            source_types=source_types,
+            source_types=wanted,
             limit=top_k,
             authorization_scope=current.authorization_scope(),
         )

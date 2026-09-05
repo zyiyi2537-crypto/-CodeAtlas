@@ -38,19 +38,19 @@ class AuthorizationScope:
         if action not in self.actions or space_id not in self.space_ids:
             return False
         roles = dict(self.space_roles)
-        return action in SPACE_ROLE_ACTIONS.get(roles.get(space_id, "viewer"), frozenset())
+        return action in SPACE_ROLE_ACTIONS.get(roles.get(space_id, ""), frozenset())
 
     def permits_repository(self, repository_id: str, action: str = "read") -> bool:
         if action not in self.actions or repository_id not in self.repository_ids:
             return False
         space_id = dict(self.repository_spaces).get(repository_id)
-        return space_id is None or self.permits_space(space_id, action)
+        return space_id is not None and self.permits_space(space_id, action)
 
     def permits_collection(self, collection_id: str, action: str = "read") -> bool:
         if action not in self.actions or collection_id not in self.collection_ids:
             return False
         space_id = dict(self.collection_spaces).get(collection_id)
-        return space_id is None or self.permits_space(space_id, action)
+        return space_id is not None and self.permits_space(space_id, action)
 
 
 def _space_roles(session: Session, user: User) -> dict[str, str]:
@@ -76,19 +76,36 @@ def resolve_authorization_scope(
     allow_anonymous_repositories: bool = False,
 ) -> AuthorizationScope:
     if user is None:
-        repository_ids: tuple[str, ...] = ()
+        repositories: list[Repository] = []
         if allow_anonymous_repositories:
-            repository_ids = tuple(
+            repositories = list(
                 session.exec(
-                    select(Repository.id).where(Repository.visibility == "public")
+                    select(Repository)
+                    .join(
+                        KnowledgeSpace,
+                        col(KnowledgeSpace.id) == col(Repository.space_id),
+                    )
+                    .where(
+                        Repository.visibility == "public",
+                        KnowledgeSpace.visibility == "workspace",
+                    )
                 ).all()
             )
+        repository_ids = tuple(sorted(repository.id for repository in repositories))
+        space_ids = tuple(sorted({repository.space_id for repository in repositories}))
         return AuthorizationScope(
             actor_user_id=None,
-            space_ids=(),
+            space_ids=space_ids,
             repository_ids=repository_ids,
             collection_ids=(),
             actions=frozenset({"read", "search"}) if repository_ids else frozenset(),
+            space_roles=tuple((space_id, "viewer") for space_id in space_ids),
+            repository_spaces=tuple(
+                sorted(
+                    (repository.id, repository.space_id)
+                    for repository in repositories
+                )
+            ),
         )
 
     if not user.is_active:

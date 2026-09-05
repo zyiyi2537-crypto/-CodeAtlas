@@ -205,28 +205,50 @@ class VectorStore:
                 if len(space_ids) == 1
                 else {"space_id": {"$in": space_ids}}
             )
-        where = clauses[0] if len(clauses) == 1 else {"$and": clauses}
-        result = self.collection.query(
-            query_embeddings=cast(Any, [query_embedding]),
-            n_results=min(max(1, limit), self.collection.count()),
-            where=cast(Any, where),
-            include=["documents", "metadatas", "distances"],
-        )
-        return [
-            {
-                "id": item_id,
-                "document": document,
-                "metadata": metadata,
-                "vector_score": max(0.0, 1.0 - float(distance)),
-            }
-            for item_id, document, metadata, distance in zip(
-                (result.get("ids") or [[]])[0],
-                (result.get("documents") or [[]])[0],
-                (result.get("metadatas") or [[]])[0],
-                (result.get("distances") or [[]])[0],
-                strict=True,
+        def query(where: dict, result_limit: int) -> list[dict]:
+            result = self.collection.query(
+                query_embeddings=cast(Any, [query_embedding]),
+                n_results=min(max(1, result_limit), self.collection.count()),
+                where=cast(Any, where),
+                include=["documents", "metadatas", "distances"],
             )
-        ]
+            return [
+                {
+                    "id": item_id,
+                    "document": document,
+                    "metadata": metadata,
+                    "vector_score": max(0.0, 1.0 - float(distance)),
+                }
+                for item_id, document, metadata, distance in zip(
+                    (result.get("ids") or [[]])[0],
+                    (result.get("documents") or [[]])[0],
+                    (result.get("metadatas") or [[]])[0],
+                    (result.get("distances") or [[]])[0],
+                    strict=True,
+                )
+            ]
+
+        where = clauses[0] if len(clauses) == 1 else {"$and": clauses}
+        candidates = query(where, limit)
+        if space_ids and DEFAULT_SPACE_ID in space_ids:
+            legacy_clauses = clauses[:-1]
+            legacy_where = (
+                legacy_clauses[0]
+                if len(legacy_clauses) == 1
+                else {"$and": legacy_clauses}
+            )
+            legacy_candidates = query(legacy_where, max(limit * 3, 20))
+            candidates.extend(
+                candidate
+                for candidate in legacy_candidates
+                if not candidate["metadata"].get("space_id")
+            )
+        by_id = {candidate["id"]: candidate for candidate in candidates}
+        return sorted(
+            by_id.values(),
+            key=lambda candidate: float(candidate["vector_score"]),
+            reverse=True,
+        )[:limit]
 
     def delete_generation(self, generation_id: str) -> None:
         if self.collection.count():

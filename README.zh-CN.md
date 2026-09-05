@@ -12,7 +12,7 @@ CodeAtlas 是面向研发团队内部代码资产的知识与理解层。它连�
 - **可验证的混合检索**：融合向量检索与 MySQL FULLTEXT，结果包含仓库、Commit、路径、符号和行号。
 - **Codex 只读 MCP**：支持搜索代码、读取必要片段、查找引用、检索文档与 Wiki，并获取带源码证据的公司工程规范。
 - **多源知识接入**：支持 GitHub、GitLab、手动文档以及 S3、COS、Notion、Confluence 等只读知识源。
-- **内部测试部署链路**：GitHub Actions 构建并发布到自有服务器，包含产物校验、健康检查和版本回滚。
+- **受保护的内部测试部署链路**：GitHub Actions 仅验证构建和测试且不持有生产凭据；服务器发布由独立认证、人工批准的维护会话执行，并包含备份、健康检查和版本回滚。
 
 自动代码 Wiki、交互式代码地图和引导式导览已进入产品规划，尚未作为当前版本能力发布。完整范围见 [产品需求文档](docs/product-requirements.zh-CN.md)。
 
@@ -145,7 +145,7 @@ VersionId/DeleteMarker 同步属于后续增强，不计入本阶段完成范围
 
 ## 部署
 
-当前部署方式将 Uvicorn 绑定到 `127.0.0.1:8010`，并由 Nginx 通过 HTTPS 对外提供服务。`systemd` 强制使用单个 worker，软内存限制为 550 MB，硬限制为 700 MB。日志保留在 `journald` 中，不包含在备份内。GitHub Actions 负责检查、构建和向自有服务器发布，不承载 MySQL、Chroma 或应用运行时。
+当前部署方式将 Uvicorn 绑定到 `127.0.0.1:8010`，并由 Nginx 通过 HTTPS 对外提供服务。`systemd` 强制使用单个 worker，软内存限制为 550 MB，硬限制为 700 MB。日志保留在 `journald` 中，不包含在备份内。GitHub Actions 负责检查和构建验证，不持有生产 SSH 凭据；向自有服务器发布由独立认证、人工批准的维护会话执行。GitHub Actions 不承载 MySQL、Chroma 或应用运行时。
 
 迁移或恢复数据前，请阅读 [deploy/RESTORE.md](deploy/RESTORE.md) 和 [docs/operations.md](docs/operations.md)。
 

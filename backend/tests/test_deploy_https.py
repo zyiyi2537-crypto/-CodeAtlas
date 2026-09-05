@@ -1,10 +1,27 @@
 from __future__ import annotations
 
+import re
+import shutil
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+BASH = shutil.which("bash") or "bash"
+
+
+def _shell_function(source: str, name: str) -> str:
+    start = source.index(f"{name}() {{")
+    end = source.index("\n}\n", start) + len("\n}\n")
+    return source[start:end]
+
+
+def _bash_path(path: Path) -> str:
+    value = path.resolve().as_posix()
+    if sys.platform == "win32" and len(value) >= 3 and value[1:3] == ":/":
+        return f"/{value[0].lower()}{value[2:]}"
+    return value
 
 
 def test_nginx_template_never_proxies_application_over_http() -> None:
@@ -26,6 +43,22 @@ def test_nginx_template_never_proxies_application_over_http() -> None:
     assert "_astro|assets|images|lab/code-kb/assets" in config
 
 
+def test_systemd_runs_new_source_through_the_reused_virtualenv() -> None:
+    service = (ROOT / "deploy" / "codeatlas.service").read_text(encoding="utf-8")
+
+    assert "WorkingDirectory=/opt/codeatlas/backend" in service
+    assert (
+        "ExecStartPre=/opt/codeatlas/backend/.venv/bin/python -m alembic "
+        "-c /opt/codeatlas/backend/alembic.ini upgrade head"
+    ) in service
+    assert (
+        "ExecStart=/opt/codeatlas/backend/.venv/bin/python -m uvicorn "
+        "codeatlas.app:create_app --factory"
+    ) in service
+    assert "/.venv/bin/alembic " not in service
+    assert "/.venv/bin/uvicorn " not in service
+
+
 def test_installer_fails_closed_without_https_and_migrates_old_allowlist() -> None:
     installer = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
 
@@ -42,10 +75,28 @@ def test_installer_fails_closed_without_https_and_migrates_old_allowlist() -> No
     assert 'command -v "$PYTHON_BIN"' in installer
     assert 'sys.version_info >= (3, 11)' in installer
     assert '"$PYTHON_BIN" "$SOURCE_ROOT/deploy/validate_nginx.py"' in installer
-    assert '"$PYTHON_BIN" -m venv "$BACKEND_CANDIDATE/.venv"' in installer
+    assert (
+        'cmp -s "$BACKEND_TARGET/pyproject.toml" '
+        '"$BACKEND_CANDIDATE/pyproject.toml"'
+    ) in installer
+    assert 'cmp -s "$BACKEND_TARGET/uv.lock" "$BACKEND_CANDIDATE/uv.lock"' in installer
+    assert 'rsync -a "$BACKEND_TARGET/.venv/" "$BACKEND_CANDIDATE/.venv/"' in installer
+    assert '"$PYTHON_BIN" -I -S -X pycache_prefix="$COMPILE_CACHE" -m compileall' in installer
+    assert "PYTHONPYCACHEPREFIX=" not in installer
+    assert "COMPILE_CACHE=$(mktemp -d /var/tmp/codeatlas-compile.XXXXXXXX)" in installer
+    assert 'rm -rf -- "${COMPILE_CACHE:?}"' in installer
+    assert "/var/tmp/codeatlas-compile-cache" not in installer
+    assert "ast.parse" in installer
+    assert 'runuser --user codeatlas --preserve-environment --' in installer
+    assert installer.count('runuser --user codeatlas --preserve-environment --') == 3
+    for line in installer.splitlines():
+        if ".venv/bin/python -m alembic" in line:
+            assert line.startswith("    .venv/bin/python")
+    assert '"$PYTHON_BIN" -m venv' not in installer
+    assert "pip install" not in installer
     assert 'REVISION_ENV_FILE=/etc/codeatlas/revision.env' in installer
     assert 'python3 "$SOURCE_ROOT/deploy/validate_nginx.py"' not in installer
-    assert 'cd "$BACKEND_CANDIDATE"' in installer
+    assert 'cd "$BACKEND_TARGET"' in installer
     assert ".venv/bin/python -m alembic -c alembic.ini upgrade head" in installer
     assert 'nginx -t -c "$NGINX_PREFLIGHT"' in installer
     assert installer.index('nginx -t -c "$NGINX_PREFLIGHT"') < installer.index(
@@ -97,19 +148,256 @@ def test_installer_fails_closed_without_https_and_migrates_old_allowlist() -> No
     assert "switch_release()" in installer
     assert "restore_release()" in installer
     assert 'switch_release || fail_nginx_switch "Release switch failed"' in installer
+    assert 'BACKUP_SCRIPT="$SOURCE_ROOT/deploy/backup.sh"' in installer
+    assert 'BACKUP_ARCHIVE=$("$BACKUP_SCRIPT")' in installer
+    assert 'sha256sum -c "$BACKUP_ARCHIVE.sha256"' in installer
+    assert 'systemctl stop nginx || fail_nginx_switch' in installer
+    assert 'systemctl stop codeatlas || fail_nginx_switch' in installer
+    assert "DB_REVISION_BEFORE" in installer
+    assert "DB_TARGET_REVISION" in installer
+    assert "MIGRATION_STARTED=true" in installer
+    assert "MIGRATION_COMPLETED=true" in installer
+    assert "rollback_database()" in installer
+    assert "dnf module enable" not in installer
+    assert "dnf install" not in installer
+    assert "MYSQL_CONFIG_CHANGED" not in installer
+    assert "for required_command in nginx rsync git mysql mysqldump sha256sum tar" in installer
+    assert "flock" in installer
+    assert 'MAINTENANCE_LOCK=/run/lock/codeatlas-maintenance.lock' in installer
+    assert 'flock -n 9' in installer
+    assert "CODEATLAS_MAINTENANCE_LOCK_HELD=1" in installer
+    assert 'MYSQL_LOAD_STATE=$(capture_load_state mysqld)' in installer
+    assert 'MYSQL_ACTIVE_STATE=$(capture_active_state mysqld)' in installer
+    assert '[[ "$MYSQL_LOAD_STATE" == loaded && "$MYSQL_ACTIVE_STATE" == active ]]' in installer
+    assert installer.index('systemctl stop nginx || fail_nginx_switch') < installer.index(
+        'BACKUP_ARCHIVE=$("$BACKUP_SCRIPT")'
+    )
+    assert installer.index('systemctl stop codeatlas || fail_nginx_switch') < installer.index(
+        'BACKUP_ARCHIVE=$("$BACKUP_SCRIPT")'
+    )
+    assert installer.index('BACKUP_ARCHIVE=$("$BACKUP_SCRIPT")') < installer.index(
+        "upgrade head"
+    )
+    assert installer.index('switch_release || fail_nginx_switch "Release switch failed"') < (
+        installer.index("upgrade head")
+    )
+    rollback_position = installer.index("rollback_nginx")
+    assert installer.index("rollback_database") < installer.index(
+        "restore_release", rollback_position
+    )
+    old_backend_restart = installer.index('systemctl restart codeatlas', rollback_position)
+    old_ingress_restart = installer.index('systemctl restart nginx', rollback_position)
+    old_health_check = installer.index(
+        'curl --fail --silent http://127.0.0.1:8010/api/v1/health',
+        rollback_position,
+    )
+    assert old_backend_restart < old_health_check < old_ingress_restart
+    assert installer.index("wait_for_local_health || fail_nginx_switch") < installer.index(
+        'systemctl start nginx || fail_public_switch'
+    )
+    assert 'if [[ "$PUBLIC_EXPOSED" == true ]]' in installer
+    assert "TRANSACTION_ACTIVE=true" in installer
+    assert "handle_unexpected_error()" in installer
+    assert "if (( BASH_SUBSHELL > 0 )); then" in installer
+    assert "handle_signal()" in installer
+    assert "trap 'handle_unexpected_error' ERR" in installer
+    assert "trap 'handle_signal HUP' HUP" in installer
+    assert "trap 'handle_signal INT' INT" in installer
+    assert "trap 'handle_signal TERM' TERM" in installer
+    assert "trap - ERR HUP INT TERM" in installer
+    assert installer.index("TRANSACTION_ACTIVE=true") < installer.index(
+        'systemctl stop nginx || fail_nginx_switch'
+    )
+    assert installer.rindex("trap - ERR HUP INT TERM") > installer.index(
+        '[[ "$MCP_STATUS" == 401 ]]'
+    )
+    https_health = installer[
+        installer.index("wait_for_https_health()") : installer.index(
+            "wait_for_local_health || fail_nginx_switch"
+        )
+    ]
+    assert 'json.load(sys.stdin)["revision"]' in https_health
 
 
-def test_deploy_only_accepts_successful_pushes_from_this_repository() -> None:
-    workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text(
+def test_backup_and_installer_share_one_maintenance_lock() -> None:
+    installer = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+    backup = (ROOT / "deploy" / "backup.sh").read_text(encoding="utf-8")
+
+    for script in (installer, backup):
+        assert 'MAINTENANCE_LOCK=/run/lock/codeatlas-maintenance.lock' in script
+        assert 'flock -n 9' in script
+    assert "CODEATLAS_MAINTENANCE_LOCK_HELD=1" in installer
+    assert '[[ ${CODEATLAS_MAINTENANCE_LOCK_HELD:-0} != 1 ]]' in backup
+    assert backup.index('flock -n 9') < backup.index(
+        'STAGE=$(mktemp -d "$BACKUP_DIR/.stage-${STAMP}-XXXXXXXX")'
+    )
+    assert 'STAGE="$BACKUP_DIR/.stage-$STAMP"' not in backup
+    assert 'ARCHIVE="$BACKUP_DIR/codeatlas-$BACKUP_ID.tar.gz"' in backup
+
+
+def test_restore_stage_rejects_a_bad_checksum_in_conditional_context(
+    tmp_path: Path,
+) -> None:
+    installer = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+    function = _shell_function(installer, "ensure_restore_stage").replace(
+        "RESTORE_STAGE=$(mktemp -d /var/backups/codeatlas/restore-XXXXXXXX)",
+        'RESTORE_STAGE=$(mktemp -d "$RESTORE_TEMPLATE")',
+    )
+    payload = tmp_path / "payload"
+    payload.mkdir()
+    (payload / "codeatlas.sql").write_text("SELECT 1;\n", encoding="utf-8")
+    archive = tmp_path / "backup.tar.gz"
+    with tarfile.open(archive, "w:gz") as bundle:
+        bundle.add(payload / "codeatlas.sql", arcname="codeatlas.sql")
+    Path(f"{archive}.sha256").write_text("invalid checksum\n", encoding="utf-8")
+    probe = f"""
+set -u
+BACKUP_ARCHIVE=$1
+RESTORE_TEMPLATE=$2
+RESTORE_STAGE=''
+{function}
+if ensure_restore_stage; then
+  printf 'UNSAFE_ACCEPT\n'
+  exit 0
+fi
+printf 'CHECKSUM_REJECTED\n'
+exit 7
+"""
+
+    result = subprocess.run(
+        [
+            BASH,
+            "-c",
+            probe,
+            "probe",
+            _bash_path(archive),
+            _bash_path(tmp_path / "restore-XXXXXXXX"),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+    assert result.returncode == 7, result.stderr
+    assert result.stdout.strip() == "CHECKSUM_REJECTED"
+
+
+def test_database_rollback_rejects_a_restored_revision_mismatch(tmp_path: Path) -> None:
+    installer = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+    function = _shell_function(installer, "rollback_database")
+    (tmp_path / "codeatlas.sql").write_text("SELECT 1;\n", encoding="utf-8")
+    probe = f"""
+set -u
+MIGRATION_STARTED=true
+MYSQL_DATABASE=codeatlas_test
+RESTORE_STAGE=$1
+DB_REVISION_BEFORE=expected_revision
+DB_TARGET_REVISION=new_revision
+MIGRATION_COMPLETED=true
+ensure_restore_stage() {{ return 0; }}
+mysql() {{
+  local argument
+  for argument in "$@"; do
+    if [[ "$argument" == -e ]]; then
+      printf 'wrong_revision\n'
+      return 0
+    fi
+  done
+  cat >/dev/null
+}}
+{function}
+if rollback_database; then
+  printf 'UNSAFE_ACCEPT\n'
+  exit 0
+fi
+printf 'REVISION_REJECTED\n'
+exit 7
+"""
+
+    result = subprocess.run(
+        [BASH, "-c", probe, "probe", _bash_path(tmp_path)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+    assert result.returncode == 7, result.stderr
+    assert result.stdout.strip() == "REVISION_REJECTED"
+
+
+def test_installer_resolves_the_complete_migration_graph_without_importing_it() -> None:
+    installer = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+    marker = 'DB_TARGET_REVISION=$("$PYTHON_BIN" -I -S - '
+    block = installer[installer.index(marker) :]
+    parser = block.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-S",
+            "-",
+            str(ROOT / "backend" / "alembic" / "versions"),
+        ],
+        input=parser,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "20260904_16"
+
+
+def test_bash_err_trap_defers_recovery_from_subshell_to_parent() -> None:
+    probe = r"""
+set -Eeuo pipefail
+recover() {
+  local status=$?
+  if (( BASH_SUBSHELL > 0 )); then
+    exit "$status"
+  fi
+  trap - ERR
+  printf 'recover pid=%s subshell=%s\n' "$BASHPID" "$BASH_SUBSHELL"
+  exit "$status"
+}
+fail_in_subshell() ( false )
+trap 'recover' ERR
+fail_in_subshell
+"""
+
+    result = subprocess.run(
+        [BASH, "-c", probe],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+    assert result.returncode != 0
+    recoveries = result.stdout.splitlines()
+    assert len(recoveries) == 1
+    assert "subshell=0" in recoveries[0]
+
+
+def test_ci_does_not_hold_a_production_deployment_path() -> None:
+    assert not (ROOT / ".github" / "workflows" / "deploy.yml").exists()
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"
     )
 
-    assert "github.event.workflow_run.conclusion == 'success'" in workflow
-    assert "github.event.workflow_run.event == 'push'" in workflow
-    assert (
-        "github.event.workflow_run.head_repository.full_name == github.repository"
-        in workflow
-    )
+    assert "DEPLOY_SSH_KEY" not in workflow
+    assert "workflow_run:" not in workflow
+    assert "upload-artifact" not in workflow
+    for reference in re.findall(r"uses:\s*[^@\s]+@([^\s#]+)", workflow):
+        assert re.fullmatch(r"[0-9a-f]{40}", reference)
 
 
 def test_nginx_validator_accepts_acme_and_plaintext_redirects(tmp_path: Path) -> None:
