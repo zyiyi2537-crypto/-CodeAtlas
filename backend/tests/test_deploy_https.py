@@ -95,6 +95,13 @@ def test_installer_fails_closed_without_https_and_migrates_old_allowlist() -> No
     assert '"$PYTHON_BIN" -m venv' not in installer
     assert "pip install" not in installer
     assert 'REVISION_ENV_FILE=/etc/codeatlas/revision.env' in installer
+    assert 'RELEASE_MARKER=/opt/codeatlas/RELEASE.json' in installer
+    assert '"$SOURCE_ROOT/RELEASE.json"' in installer
+    assert 'metadata["commit"] != expected_revision' in installer
+    assert 'install -m 0644 "$SOURCE_ROOT/RELEASE.json" "$RELEASE_MARKER"' in installer
+    assert 'install -m 0644 "$RELEASE_MARKER" "$NGINX_BACKUP_DIR/RELEASE.json"' in installer
+    assert 'install -m 0644 "$NGINX_BACKUP_DIR/RELEASE.json" "$RELEASE_MARKER"' in installer
+    assert 'rm -f -- "$RELEASE_MARKER"' in installer
     assert 'python3 "$SOURCE_ROOT/deploy/validate_nginx.py"' not in installer
     assert 'cd "$BACKEND_TARGET"' in installer
     assert ".venv/bin/python -m alembic -c alembic.ini upgrade head" in installer
@@ -175,6 +182,18 @@ def test_installer_fails_closed_without_https_and_migrates_old_allowlist() -> No
     assert installer.index('systemctl stop codeatlas || fail_nginx_switch') < installer.index(
         'BACKUP_ARCHIVE=$("$BACKUP_SCRIPT")'
     )
+    stopped_position = installer.index(
+        'verify_active_state codeatlas inactive || fail_nginx_switch'
+    )
+    active_work_position = installer.index(
+        'assert_no_active_work || fail_nginx_switch', stopped_position
+    )
+    assert stopped_position < active_work_position
+    assert active_work_position < installer.index("DB_REVISION_BEFORE=", active_work_position)
+    assert active_work_position < installer.index(
+        'BACKUP_ARCHIVE=$("$BACKUP_SCRIPT")', active_work_position
+    )
+    assert active_work_position < installer.index("upgrade head", active_work_position)
     assert installer.index('BACKUP_ARCHIVE=$("$BACKUP_SCRIPT")') < installer.index(
         "upgrade head"
     )
@@ -219,6 +238,98 @@ def test_installer_fails_closed_without_https_and_migrates_old_allowlist() -> No
     assert 'json.load(sys.stdin)["revision"]' in https_health
 
 
+def test_quiesced_active_work_gate_rejects_work_and_malformed_results() -> None:
+    installer = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+    function = _shell_function(installer, "assert_no_active_work")
+    probe = f"""
+set -u
+MYSQL_DATABASE=codeatlas
+MYSQL_RESULT=$1
+mysql() {{ printf '%b' "$MYSQL_RESULT"; }}
+{function}
+if assert_no_active_work; then
+  printf 'ACCEPTED\n'
+  exit 0
+fi
+printf 'REJECTED\n'
+exit 7
+"""
+
+    cases = {
+        "zero": ("0\\t0\\n", 0, "ACCEPTED"),
+        "index-running": ("1\\t0\\n", 7, "REJECTED"),
+        "external-syncing": ("0\\t2\\n", 7, "REJECTED"),
+        "malformed": ("unknown\\n", 7, "REJECTED"),
+        "empty-extra-field": ("0\\t0\\t\\n", 7, "REJECTED"),
+        "extra-line": ("0\\t0\\n0\\t0\\n", 7, "REJECTED"),
+    }
+    for name, (mysql_result, expected_code, expected_output) in cases.items():
+        result = subprocess.run(
+            [BASH, "-c", probe, "probe", mysql_result],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        assert result.returncode == expected_code, (name, result.stderr)
+        assert result.stdout.strip() == expected_output, name
+
+
+def test_release_marker_is_restored_or_removed_by_pre_exposure_rollback(
+    tmp_path: Path,
+) -> None:
+    installer = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+    function = _shell_function(installer, "restore_nginx_files")
+    backup_dir = tmp_path / "backup"
+    backup_dir.mkdir()
+    marker = tmp_path / "RELEASE.json"
+    old_marker = '{"commit":"old"}\n'
+    new_marker = '{"commit":"new"}\n'
+    (backup_dir / "RELEASE.json").write_text(old_marker, encoding="utf-8")
+
+    probe = f"""
+set -u
+NGINX_TARGET=$1/nginx.conf
+NGINX_DEFAULT=$1/default.conf
+CODEATLAS_SERVICE=$1/codeatlas.service
+REVISION_ENV_FILE=$1/revision.env
+RELEASE_MARKER=$1/RELEASE.json
+NGINX_BACKUP_DIR=$1/backup
+NGINX_TARGET_EXISTED=false
+NGINX_DEFAULT_EXISTED=false
+CODEATLAS_SERVICE_EXISTED=false
+REVISION_ENV_EXISTED=false
+RELEASE_MARKER_EXISTED=$2
+{function}
+restore_nginx_files
+"""
+
+    marker.write_text(new_marker, encoding="utf-8")
+    restored = subprocess.run(
+        [BASH, "-c", probe, "probe", _bash_path(tmp_path), "true"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    assert restored.returncode == 0, restored.stderr
+    assert marker.read_text(encoding="utf-8") == old_marker
+
+    marker.write_text(new_marker, encoding="utf-8")
+    removed = subprocess.run(
+        [BASH, "-c", probe, "probe", _bash_path(tmp_path), "false"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    assert removed.returncode == 0, removed.stderr
+    assert not marker.exists()
+
+
 def test_backup_and_installer_share_one_maintenance_lock() -> None:
     installer = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
     backup = (ROOT / "deploy" / "backup.sh").read_text(encoding="utf-8")
@@ -240,9 +351,10 @@ def test_restore_stage_rejects_a_bad_checksum_in_conditional_context(
 ) -> None:
     installer = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
     function = _shell_function(installer, "ensure_restore_stage").replace(
-        "RESTORE_STAGE=$(mktemp -d /var/backups/codeatlas/restore-XXXXXXXX)",
-        'RESTORE_STAGE=$(mktemp -d "$RESTORE_TEMPLATE")',
+        "restore_candidate=$(mktemp -d /var/backups/codeatlas/restore-XXXXXXXX)",
+        'restore_candidate=$(mktemp -d "$RESTORE_TEMPLATE")',
     )
+    assert 'restore_candidate=$(mktemp -d "$RESTORE_TEMPLATE")' in function
     payload = tmp_path / "payload"
     payload.mkdir()
     (payload / "codeatlas.sql").write_text("SELECT 1;\n", encoding="utf-8")

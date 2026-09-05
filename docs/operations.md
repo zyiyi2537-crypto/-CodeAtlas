@@ -87,12 +87,14 @@ maintenance session.
 Before running `deploy/install.sh`, verify the release SHA-256, the destination
 host and application topology, and a quiesced `deploy/backup.sh` archive. The
 installer rejects dependency-lock changes, prepares candidates before downtime,
-closes public ingress before the database migration, and restores the verified
-database, mutable data, old code, static files, Nginx/systemd configuration, and
-build revision if acceptance fails before public exposure. After exposure it
-closes ingress and retains the new state for deliberate recovery rather than
-overwriting accepted writes. `/api/v1/health` exposes the deployed commit in its
-`revision` field.
+closes public ingress before the database migration, rechecks indexing and
+external-sync activity after the application is stopped, and refuses to snapshot
+or migrate unless both counts are zero. It restores the verified database,
+mutable data, old code, static files, Nginx/systemd configuration, build revision,
+and `/opt/codeatlas/RELEASE.json` marker if acceptance fails before public
+exposure. After exposure it closes ingress and retains the new state for
+deliberate recovery rather than overwriting accepted writes.
+`/api/v1/health` exposes the deployed commit in its `revision` field.
 
 ## Backup
 

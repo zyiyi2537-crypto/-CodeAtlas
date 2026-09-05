@@ -6,6 +6,7 @@ ENV_FILE=/etc/codeatlas/codeatlas.env
 BACKUP_SCRIPT="$SOURCE_ROOT/deploy/backup.sh"
 MAINTENANCE_LOCK=/run/lock/codeatlas-maintenance.lock
 REVISION_ENV_FILE=/etc/codeatlas/revision.env
+RELEASE_MARKER=/opt/codeatlas/RELEASE.json
 NGINX_TARGET=/etc/nginx/conf.d/codeatlas.conf
 NGINX_DEFAULT=/etc/nginx/conf.d/default.conf
 CODEATLAS_SERVICE=/etc/systemd/system/codeatlas.service
@@ -50,7 +51,9 @@ if [[ $(id -u) -ne 0 ]]; then
   echo "Run this installer as root" >&2
   exit 1
 fi
-if [[ ! -d "$SOURCE_ROOT/backend" || ! -d "$SOURCE_ROOT/frontend-dist" || ! -d "$SOURCE_ROOT/blog-dist" ]]; then
+if [[ ! -d "$SOURCE_ROOT/backend" || ! -d "$SOURCE_ROOT/frontend-dist" || \
+      ! -d "$SOURCE_ROOT/blog-dist" || ! -f "$SOURCE_ROOT/RELEASE.json" || \
+      -L "$SOURCE_ROOT/RELEASE.json" ]]; then
   echo "Release directory is incomplete: $SOURCE_ROOT" >&2
   exit 1
 fi
@@ -124,6 +127,23 @@ if [[ ! "$BUILD_REVISION" =~ ^[A-Za-z0-9._-]{1,64}$ ]]; then
   echo "Release revision must contain 1-64 safe identifier characters" >&2
   exit 1
 fi
+"$PYTHON_BIN" -I -S - "$SOURCE_ROOT/RELEASE.json" "$BUILD_REVISION" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+metadata_path = Path(sys.argv[1])
+expected_revision = sys.argv[2]
+try:
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    raise SystemExit("Release metadata is not valid JSON") from exc
+if metadata["commit"] != expected_revision:
+    raise SystemExit("Release metadata commit does not match REVISION")
+if re.fullmatch(r"[0-9a-f]{40}", str(metadata.get("tree", ""))) is None:
+    raise SystemExit("Release metadata tree is not a Git tree identifier")
+PY
 CODEATLAS_DOMAIN=${CODEATLAS_PUBLIC_ORIGIN#https://}
 if [[ ! "$CODEATLAS_DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]]; then
   echo "CODEATLAS_PUBLIC_ORIGIN must contain only an HTTPS hostname without a path" >&2
@@ -358,6 +378,7 @@ NGINX_TARGET_EXISTED=false
 NGINX_DEFAULT_EXISTED=false
 CODEATLAS_SERVICE_EXISTED=false
 REVISION_ENV_EXISTED=false
+RELEASE_MARKER_EXISTED=false
 if [[ -f "$NGINX_TARGET" ]]; then
   install -m 0644 "$NGINX_TARGET" "$NGINX_BACKUP_DIR/codeatlas.conf"
   NGINX_TARGET_EXISTED=true
@@ -373,6 +394,14 @@ fi
 if [[ -f "$REVISION_ENV_FILE" ]]; then
   install -m 0640 "$REVISION_ENV_FILE" "$NGINX_BACKUP_DIR/revision.env"
   REVISION_ENV_EXISTED=true
+fi
+if [[ -e "$RELEASE_MARKER" || -L "$RELEASE_MARKER" ]]; then
+  if [[ ! -f "$RELEASE_MARKER" || -L "$RELEASE_MARKER" ]]; then
+    echo "Existing release marker is not a regular file" >&2
+    exit 1
+  fi
+  install -m 0644 "$RELEASE_MARKER" "$NGINX_BACKUP_DIR/RELEASE.json"
+  RELEASE_MARKER_EXISTED=true
 fi
 
 verify_active_state() {
@@ -435,6 +464,15 @@ restore_nginx_files() {
     fi
   else
     if ! rm -f -- "$REVISION_ENV_FILE"; then
+      failed=1
+    fi
+  fi
+  if [[ "$RELEASE_MARKER_EXISTED" == true ]]; then
+    if ! install -m 0644 "$NGINX_BACKUP_DIR/RELEASE.json" "$RELEASE_MARKER"; then
+      failed=1
+    fi
+  else
+    if ! rm -f -- "$RELEASE_MARKER"; then
       failed=1
     fi
   fi
@@ -707,6 +745,25 @@ handle_signal() {
   exit 1
 }
 
+assert_no_active_work() {
+  local result
+  local index_active
+  local external_active
+  local extra
+  result=$(mysql --protocol=socket --user=root \
+    --batch --skip-column-names "$MYSQL_DATABASE" -e \
+    "SELECT
+       (SELECT COUNT(*) FROM indexjob WHERE status IN ('queued','running')),
+       (SELECT COUNT(*) FROM externalsource WHERE sync_status IN ('queued','syncing'));"
+  ) || return 1
+  [[ "$result" != *$'\n'* ]] || return 1
+  IFS=$'\t' read -r index_active external_active extra <<< "$result"
+  [[ "$index_active" =~ ^[0-9]+$ && \
+     "$external_active" =~ ^[0-9]+$ && -z "$extra" ]] || return 1
+  [[ "$result" == "$index_active"$'\t'"$external_active" ]] || return 1
+  (( index_active == 0 && external_active == 0 ))
+}
+
 trap 'handle_unexpected_error' ERR
 trap 'handle_signal HUP' HUP
 trap 'handle_signal INT' INT
@@ -716,6 +773,8 @@ systemctl stop nginx || fail_nginx_switch "Nginx stop failed"
 systemctl stop codeatlas || fail_nginx_switch "CodeAtlas stop failed"
 verify_active_state nginx inactive || fail_nginx_switch "Nginx did not stop cleanly"
 verify_active_state codeatlas inactive || fail_nginx_switch "CodeAtlas did not stop cleanly"
+assert_no_active_work || fail_nginx_switch \
+  "Background indexing or external synchronization is still active"
 
 DB_REVISION_BEFORE=$(
   cd "$BACKEND_TARGET"
@@ -773,6 +832,9 @@ if [[ "$DB_REVISION_AFTER" != "$DB_TARGET_REVISION" ]]; then
   fail_nginx_switch "Database did not reach the target revision"
 fi
 MIGRATION_COMPLETED=true
+
+install -m 0644 "$SOURCE_ROOT/RELEASE.json" "$RELEASE_MARKER" \
+  || fail_nginx_switch "Release metadata installation failed"
 
 systemctl daemon-reload || fail_nginx_switch "systemd daemon reload failed"
 systemctl enable nginx codeatlas || fail_nginx_switch "Service enable failed"
