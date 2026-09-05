@@ -233,7 +233,8 @@ capture_active_state() {
   local state
   state=$(systemctl is-active "$unit" 2>/dev/null || true)
   case "$state" in
-    active|inactive) printf '%s' "$state" ;;
+    active) printf '%s' "$state" ;;
+    inactive|failed) printf 'inactive' ;;
     *) echo "Cannot determine active state for $unit: ${state:-empty}" >&2; return 1 ;;
   esac
 }

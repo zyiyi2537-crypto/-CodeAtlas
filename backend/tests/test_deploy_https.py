@@ -276,6 +276,38 @@ exit 7
         assert result.stdout.strip() == expected_output, name
 
 
+def test_active_state_normalizes_stopped_failed_units_but_rejects_transitions() -> None:
+    installer = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+    function = _shell_function(installer, "capture_active_state")
+    probe = f"""
+set -u
+SYSTEMD_STATE=$1
+systemctl() {{ printf '%s\n' "$SYSTEMD_STATE"; }}
+{function}
+capture_active_state nginx
+"""
+
+    cases = {
+        "active": (0, "active"),
+        "inactive": (0, "inactive"),
+        "failed": (0, "inactive"),
+        "activating": (1, ""),
+        "deactivating": (1, ""),
+        "unknown": (1, ""),
+    }
+    for state, (expected_code, expected_output) in cases.items():
+        result = subprocess.run(
+            [BASH, "-c", probe, "probe", state],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        assert result.returncode == expected_code, (state, result.stderr)
+        assert result.stdout.strip() == expected_output, state
+
+
 def test_release_marker_is_restored_or_removed_by_pre_exposure_rollback(
     tmp_path: Path,
 ) -> None:
