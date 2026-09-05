@@ -1,0 +1,237 @@
+name: manual-production-release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: codeatlas-production
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: production
+    env:
+      DEPLOY_HOST: 116.62.189.63
+      DEPLOY_USER: root
+      DEPLOY_KNOWN_HOSTS: 116.62.189.63 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOeb1GvHB4efdoxu/j8496ogs5PoqZ62mU1emQiK04/e
+      CODEATLAS_PUBLIC_ORIGIN: https://atcode.asia
+    steps:
+      - name: Require deployment configuration
+        env:
+          DEPLOY_PASSWORD: ${{ secrets.DEPLOY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for name in DEPLOY_HOST DEPLOY_USER DEPLOY_KNOWN_HOSTS CODEATLAS_PUBLIC_ORIGIN DEPLOY_PASSWORD; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Missing production setting: $name" >&2
+              exit 1
+            fi
+          done
+          [[ "$DEPLOY_HOST" == "116.62.189.63" ]]
+          [[ "$DEPLOY_USER" == "root" ]]
+          [[ "$CODEATLAS_PUBLIC_ORIGIN" == "https://atcode.asia" ]]
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+
+      - name: Require successful CI for this exact commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          sha = os.environ["EXPECTED_SHA"]
+          repository = os.environ["GITHUB_REPOSITORY"]
+          request = urllib.request.Request(
+              f"https://api.github.com/repos/{repository}/actions/runs?head_sha={sha}&per_page=100",
+              headers={
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                  "User-Agent": "CodeAtlas-release",
+              },
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              runs = json.load(response)["workflow_runs"]
+          accepted = [
+              run for run in runs
+              if run["name"] == "ci"
+              and run["head_sha"] == sha
+              and run["status"] == "completed"
+              and run["conclusion"] == "success"
+          ]
+          if len(accepted) != 1:
+              raise SystemExit("Exact commit does not have exactly one successful CI run")
+          print(f"CI_GATE=PASSED run={accepted[0]['id']} sha={sha}")
+          PY
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 11.13.1
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: |
+            frontend/pnpm-lock.yaml
+            blog/pnpm-lock.yaml
+
+      - name: Build frontend and blog from the release commit
+        env:
+          SITE_URL: https://atcode.asia
+        run: |
+          set -euo pipefail
+          pnpm --dir frontend install --frozen-lockfile
+          pnpm --dir frontend build
+          pnpm --dir blog install --frozen-lockfile
+          pnpm --dir blog build
+
+      - name: Assemble commit-bound release
+        env:
+          RELEASE_SHA: ${{ github.sha }}
+          CI_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          tree=$(git rev-parse "${RELEASE_SHA}^{tree}")
+          [[ "$RELEASE_SHA" == "$(git rev-parse HEAD)" ]]
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
+          install -d -m 0755 release/backend release/deploy release/frontend-dist release/blog-dist release/blog-content
+          rsync -a --delete --exclude .venv --exclude data backend/ release/backend/
+          rsync -a --delete deploy/ release/deploy/
+          rsync -a --delete frontend/dist/ release/frontend-dist/
+          rsync -a --delete blog/dist/ release/blog-dist/
+          rsync -a --delete blog/src/content/ release/blog-content/
+          printf '%s\n' "$RELEASE_SHA" > release/REVISION
+          python - "$RELEASE_SHA" "$tree" "$CI_RUN_ID" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          commit, tree, run_id = sys.argv[1:]
+          Path("release/RELEASE.json").write_text(
+              json.dumps(
+                  {"commit": commit, "tree": tree, "release_workflow_run": int(run_id)},
+                  sort_keys=True,
+              ) + "\n",
+              encoding="utf-8",
+              newline="\n",
+          )
+          PY
+          (
+            cd release
+            find . -type f ! -name SHA256SUMS -print0 \
+              | sort -z \
+              | xargs -0 sha256sum > SHA256SUMS
+            sha256sum --check SHA256SUMS
+          )
+          tar --create --gzip --file "codeatlas-$RELEASE_SHA.tar.gz" --directory release .
+          sha256sum "codeatlas-$RELEASE_SHA.tar.gz" > "codeatlas-$RELEASE_SHA.tar.gz.sha256"
+
+      - name: Configure password SSH without exposing it
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass
+          install -d -m 0700 ~/.ssh
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 0600 ~/.ssh/known_hosts
+
+      - name: Attest production destination and topology read-only
+        env:
+          SSHPASS: ${{ secrets.DEPLOY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          sshpass -e ssh \
+            -o BatchMode=no \
+            -o PreferredAuthentications=password \
+            -o PubkeyAuthentication=no \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          [[ "$(hostname)" == "iZbp1i2nozhwtuoenl9yndZ" ]]
+          [[ "$(id -un)" == "root" ]]
+          systemctl show codeatlas -p LoadState -p ActiveState -p SubState -p FragmentPath -p WorkingDirectory
+          systemctl show nginx -p LoadState -p ActiveState -p SubState -p FragmentPath
+          systemctl show mysqld -p LoadState -p ActiveState -p SubState -p FragmentPath
+          [[ -d /opt/codeatlas/backend ]]
+          [[ -d /var/www/codeatlas ]]
+          [[ -f /etc/codeatlas/codeatlas.env ]]
+          [[ -f /etc/nginx/conf.d/codeatlas.conf ]]
+          [[ -f /opt/codeatlas/backend/pyproject.toml ]]
+          grep -E '^[[:space:]]*(server_name|root|alias|proxy_pass)[[:space:]]' /etc/nginx/conf.d/codeatlas.conf
+          df -Pk /opt/codeatlas /var/www/codeatlas /var/backups/codeatlas
+          printf 'DESTINATION_ATTESTATION=PASSED\n'
+          REMOTE
+
+      - name: Upload, verify, and transactionally deploy
+        env:
+          SSHPASS: ${{ secrets.DEPLOY_PASSWORD }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          ssh_base=(
+            sshpass -e ssh
+            -o BatchMode=no
+            -o PreferredAuthentications=password
+            -o PubkeyAuthentication=no
+            -o StrictHostKeyChecking=yes
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts"
+          )
+          scp_base=(
+            sshpass -e scp
+            -o BatchMode=no
+            -o PreferredAuthentications=password
+            -o PubkeyAuthentication=no
+            -o StrictHostKeyChecking=yes
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts"
+          )
+          remote_dir="/tmp/codeatlas-release-$RELEASE_SHA"
+          archive="codeatlas-$RELEASE_SHA.tar.gz"
+          cleanup() {
+            "${ssh_base[@]}" "$DEPLOY_USER@$DEPLOY_HOST" \
+              "rm -rf -- '$remote_dir'" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          "${ssh_base[@]}" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "install -d -m 0700 '$remote_dir'"
+          "${scp_base[@]}" "$archive" "$archive.sha256" \
+            "$DEPLOY_USER@$DEPLOY_HOST:$remote_dir/"
+          "${ssh_base[@]}" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "set -euo pipefail; cd '$remote_dir'; sha256sum -c '$archive.sha256'; install -d -m 0700 release; tar -xzf '$archive' -C release; cd release; sha256sum -c SHA256SUMS; bash -n deploy/install.sh; deploy/install.sh '$remote_dir/release'"
+
+      - name: Verify public production revision
+        env:
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          health=$(curl --fail --silent --show-error \
+            "$CODEATLAS_PUBLIC_ORIGIN/api/code-kb/health")
+          ready=$(curl --fail --silent --show-error \
+            "$CODEATLAS_PUBLIC_ORIGIN/api/code-kb/ready")
+          HEALTH="$health" READY="$ready" RELEASE_SHA="$RELEASE_SHA" python - <<'PY'
+          import json
+          import os
+
+          health = json.loads(os.environ["HEALTH"])
+          json.loads(os.environ["READY"])
+          assert health["revision"] == os.environ["RELEASE_SHA"], health
+          print(f"PRODUCTION_ACCEPTANCE=PASSED revision={health['revision']}")
+          PY
+          curl --fail --silent --show-error "$CODEATLAS_PUBLIC_ORIGIN/" >/dev/null
+          curl --fail --silent --show-error "$CODEATLAS_PUBLIC_ORIGIN/lab/code-kb/" >/dev/null
+          status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            "$CODEATLAS_PUBLIC_ORIGIN/mcp")
+          [[ "$status" == 401 ]]
