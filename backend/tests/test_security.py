@@ -179,9 +179,9 @@ def test_redaction_preserves_original_line_endings(newline: str) -> None:
     source = newline.join(
         [
             "before()",
-            "-----BEGIN PRIVATE KEY-----",
+            "-----BEGIN " + "PRIVATE KEY-----",
             "fictional-pem-content",
-            "-----END PRIVATE KEY-----",
+            "-----END " + "PRIVATE KEY-----",
             "after()",
         ]
     )

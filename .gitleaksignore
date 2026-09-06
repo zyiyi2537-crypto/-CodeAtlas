@@ -1,0 +1,3 @@
+# Historical test fixture containing only the literal fictional-pem-content.
+# Keep scanning every other finding, including future edits to this test.
+839a8738a7e868e6a0a73efe957f54e9a2ac02a0:backend/tests/test_security.py:private-key:182
