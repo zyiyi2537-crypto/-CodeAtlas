@@ -99,6 +99,7 @@ from .models import (
     new_id,
     utc_now,
 )
+from .retrieval import RevisionUnavailableError
 from .roles import (
     ASSIGNABLE_ROLES,
     MEMBER_ROLE,
@@ -3102,6 +3103,7 @@ def get_stats(request: Request):
 def get_file(
     repository_id: str, request: Request, path: str = Query(..., max_length=1000),
     start_line: int = 1, end_line: int = 200,
+    commit: str | None = Query(default=None, min_length=1, max_length=64),
 ):
     with database(request) as session:
         identity = resolve_identity(request, session)
@@ -3118,9 +3120,12 @@ def get_file(
                 start_line,
                 end_line,
                 authorization_scope=scope,
+                commit=commit,
             )
         except PermissionError as exc:
             raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
+        except RevisionUnavailableError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
         except FileNotFoundError as exc:

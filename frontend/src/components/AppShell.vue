@@ -21,10 +21,9 @@ import {
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { logout, useAuth } from '@/auth'
-import { api } from '@/api'
-import { csrfHeaders } from '@/auth'
+import { logout, logoutAll, useAuth } from '@/auth'
 import { roleLabel } from '@/roles'
+import { sessionVersion } from '@/sessionScope'
 
 const route = useRoute()
 const router = useRouter()
@@ -98,9 +97,7 @@ async function signOut() {
 }
 
 async function signOutAll() {
-  await api.post('/auth/logout-all', null, { headers: csrfHeaders() })
-  state.user = null
-  state.csrfToken = ''
+  await logoutAll()
   menuOpen.value = false
   await router.push('/')
 }
@@ -195,7 +192,7 @@ async function signOutAll() {
     </aside>
 
     <main class="main-content">
-      <RouterView />
+      <RouterView :key="sessionVersion" />
     </main>
     <button
       v-if="menuOpen"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from pathlib import Path
 from typing import Any, cast
@@ -10,13 +11,19 @@ from sqlmodel import Session, col, select
 
 from .authorization import AuthorizationScope
 from .chunker import read_text
-from .embeddings import EmbeddingClient, settings_for_profile
+from .embeddings import EmbeddingClient, EmbeddingUnavailableError, settings_for_profile
 from .models import EmbeddingProfile, Repository, RepositoryAccess, User
 from .ranking import fuse_and_rerank, rerank_across_source_types, tokenize
 from .roles import is_admin_role
 from .security import redact_secrets, resolve_repository_file
 from .settings import Settings
 from .vector_store import VectorStore, code_generation_namespace
+
+logger = logging.getLogger(__name__)
+
+
+class RevisionUnavailableError(ValueError):
+    """A requested immutable revision is no longer the active checkout."""
 
 
 class CodeRetriever:
@@ -116,17 +123,21 @@ class CodeRetriever:
             return []
         candidate_limit = 50
         embedding_settings, namespace = self._current_embedding_context()
-        vector = self._vector_candidates(
-            embedding_settings,
-            namespace,
-            EmbeddingClient(embedding_settings).embed([query])[0],
-            generation_ids,
-            candidate_limit,
-            languages,
-        )
         lexical = self._lexical_candidates(
             query, generation_ids, candidate_limit, languages, path_prefix
         )
+        degraded = False
+        try:
+            query_embedding = EmbeddingClient(embedding_settings).embed_query(query)
+        except EmbeddingUnavailableError:
+            logger.warning("Code retrieval using lexical fallback: embedding unavailable")
+            vector = []
+            degraded = True
+        else:
+            vector = self._vector_candidates(
+                embedding_settings, namespace, query_embedding,
+                generation_ids, candidate_limit, languages,
+            )
         allowed_languages = {value.lower() for value in (languages or [])}
 
         def matches(candidate: dict) -> bool:
@@ -136,12 +147,17 @@ class CodeRetriever:
                 return False
             return not path_prefix or str(metadata.get("path", "")).startswith(path_prefix)
 
-        return fuse_and_rerank(
+        results = fuse_and_rerank(
             query,
             [candidate for candidate in vector if matches(candidate)],
             [candidate for candidate in lexical if matches(candidate)],
             max(1, min(limit, 10)),
         )
+        if degraded:
+            for item in results:
+                item["degraded"] = True
+                item["degradation_reason"] = "embedding_unavailable"
+        return results
 
     def _vector_candidates(
         self,
@@ -349,6 +365,7 @@ class CodeRetriever:
         start_line: int = 1, end_line: int = 200,
         scope_repository_ids: tuple[str, ...] | None = None,
         authorization_scope: AuthorizationScope | None = None,
+        commit: str | None = None,
     ) -> dict:
         repositories = {
             repo.id: repo
@@ -359,6 +376,10 @@ class CodeRetriever:
         if repository_id not in repositories:
             raise PermissionError("repository is not accessible")
         repository = repositories[repository_id]
+        if commit is not None and commit != repository.last_commit:
+            raise RevisionUnavailableError(
+                "Requested code revision is no longer active; refresh the source citation"
+            )
         path = resolve_repository_file(Path(repository.local_path), relative_path)
         start = max(1, start_line)
         end = max(start, min(end_line, start + 199))

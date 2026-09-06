@@ -20,6 +20,10 @@ if TYPE_CHECKING:
 _TOKEN_RE = re.compile(r"[A-Za-z_$][A-Za-z0-9_$.-]*|[\u4e00-\u9fff]+|\d+")
 
 
+class EmbeddingUnavailableError(RuntimeError):
+    """A transient provider failure for which lexical retrieval can continue."""
+
+
 def embedding_credential_name(credential_ref: str) -> str:
     normalized = credential_ref.strip().upper().replace("-", "_")
     return f"CODEATLAS_CREDENTIAL_{normalized}"
@@ -68,8 +72,10 @@ def settings_for_profile(settings: Settings, profile: EmbeddingProfile) -> Setti
 
 
 class EmbeddingClient:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, *, timeout_seconds: float = 60, max_retries: int = 3):
         self.settings = settings
+        self.timeout_seconds = timeout_seconds
+        self.max_retries = max_retries
         allowed_modes = {"hash", "openai", "tencent_multimodal"}
         if settings.embedding_mode not in allowed_modes:
             raise ValueError(
@@ -84,8 +90,22 @@ class EmbeddingClient:
         if self.settings.embedding_mode == "hash":
             return [self._hash_embedding(text) for text in texts]
         if self.settings.embedding_mode == "tencent_multimodal":
-            return self._embed_tencent_texts(texts)
-        return self._embed_with_retry(texts)
+            return self._embed_tencent_texts(texts, self.max_retries)
+        return self._embed_with_retry(texts, self.max_retries)
+
+    def embed_query(self, text: str) -> list[float]:
+        # Interactive searches must not inherit the indexing retry budget.
+        client = EmbeddingClient(self.settings, timeout_seconds=5, max_retries=1)
+        try:
+            return client.embed([text])[0]
+        except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as exc:
+            raise EmbeddingUnavailableError("Embedding service temporarily unavailable") from exc
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in {408, 429} or exc.response.status_code >= 500:
+                raise EmbeddingUnavailableError(
+                    "Embedding service temporarily unavailable"
+                ) from exc
+            raise
 
     def probe_dimension(self, text: str = "CodeAtlas 向量维度探测") -> int:
         if self.settings.embedding_mode == "tencent_multimodal":
@@ -132,7 +152,7 @@ class EmbeddingClient:
             url,
             headers={"Authorization": f"Bearer {self.settings.embedding_api_key}"},
             json=payload,
-            timeout=60,
+            timeout=self.timeout_seconds,
         )
         response.raise_for_status()
         return response.json()

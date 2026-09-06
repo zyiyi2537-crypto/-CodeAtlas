@@ -241,8 +241,9 @@ def build_mcp(
     @mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
     def get_file(
         repository: str, path: str, start_line: int = 1, end_line: int = 200,
+        commit: str | None = None,
     ) -> dict:
-        """Read at most 200 numbered lines from an accessible repository file."""
+        """Read up to 200 lines; pass the citation commit to reject changed revisions."""
         current = identity("read")
         if repository not in current.repository_ids:
             raise PermissionError("repository is outside this token scope")
@@ -253,6 +254,7 @@ def build_mcp(
             start_line,
             end_line,
             authorization_scope=current.authorization_scope(),
+            commit=commit,
         )
 
     @mcp.tool(annotations=OPEN_WORLD_READ_ONLY_TOOL_ANNOTATIONS)

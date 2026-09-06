@@ -12,6 +12,11 @@ then Git creates an immutable worktree for the job. The database points file
 preview at the worktree associated with the active index, preventing a failed
 sync from showing files from a different commit.
 
+File reads accept an optional citation commit. Authorization runs first; if the
+requested commit differs from the active checkout, REST returns 409 instead of
+presenting current content as historical evidence. Clients without a commit keep
+the existing current-version behavior.
+
 ## Retrieval
 
 1. Resolve the upper-bound repository set from browser RBAC or MCP Token scope.
@@ -25,6 +30,16 @@ sync from showing files from a different commit.
 Uploaded document and Wiki retrieval is owned by `KnowledgeSearch`. Browser and MCP
 adapters apply identity checks, then call the same query validation, filtering,
 ranking and result formatting implementation.
+
+Interactive embedding queries use one attempt with a five-second HTTP timeout.
+Network failures and provider 408, 429 or 5xx responses allow authorized lexical
+results to continue, marked with `degraded` and `degradation_reason`. Invalid
+credentials, configuration and embedding dimensions still fail explicitly.
+This fallback does not cover arbitrary database or Chroma failures, and an empty
+result list currently has no separate degradation envelope.
+
+Chat citations include only evidence retained within the model context budget.
+Code citations carry their commit so previews can enforce the same revision.
 
 ## Runtime
 
@@ -44,21 +59,26 @@ GitLab are separate remote adapters. Each source respects its configured polling
 interval, and a failed provider cycle is logged without stopping the other
 provider or future cycles.
 
+The source polling loop also isolates database failures and external-source
+submission failures, waiting on its interruptible 60-second interval before the
+next cycle.
+
 ## Trust Boundaries
 
 | Boundary | Controls |
 |---|---|
-| Browser | Argon2id, server-side session, HttpOnly cookie, Origin check, CSRF |
+| Browser | Argon2id, server-side session, HttpOnly cookie, Origin check, CSRF; session-scoped cache reset and request cancellation |
 | MCP HTTP | Bearer Token digest lookup, expiry/revocation, scopes, repository IDs |
 | Git network | HTTPS only, host allowlist, DNS public-address check, no credentials |
 | Git content | no submodules/LFS, shallow branch, file count and byte limits |
-| Indexed content | assignment and PEM redaction before embedding/storage |
+| Indexed content | shared credential detection and redaction before embedding/storage, preserving line breaks |
 | File reads | active authorized repository, resolved path containment, 200 lines/64 KB |
 
 ## Deliberate Omissions
 
-The first release does not include AI chat, write-capable MCP tools, repository
-webhooks, Redis, PostgreSQL, MinIO or Milvus. Those additions are justified only
-after multi-process indexing, larger corpora or high availability become real
-requirements. A vector backend interface should be introduced only when a
-second working adapter creates a real seam.
+The current release includes retrieval-augmented chat but does not include
+write-capable MCP tools, repository webhooks, Redis, PostgreSQL, MinIO or Milvus.
+Distributed infrastructure should follow measured throughput and availability
+requirements. A vector backend interface becomes useful when a second working
+adapter is introduced. Automatic repository Wiki generation, code maps, tours,
+enterprise SSO and multi-tenant isolation remain planned work.

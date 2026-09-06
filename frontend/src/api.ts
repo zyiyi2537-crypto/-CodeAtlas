@@ -1,5 +1,6 @@
-import axios from 'axios'
-import { useAuth } from '@/auth'
+import axios, { type InternalAxiosRequestConfig } from 'axios'
+import { clearSession } from '@/auth'
+import { sessionSignal, sessionVersion } from '@/sessionScope'
 
 export const api = axios.create({
   baseURL: import.meta.env.VITE_API_BASE || '/api/code-kb',
@@ -8,17 +9,55 @@ export const api = axios.create({
   headers: { 'Content-Type': 'application/json' },
 })
 
+const requests = new WeakMap<InternalAxiosRequestConfig, { version: number; dispose: () => void }>()
+
+api.interceptors.request.use((config) => {
+  const controller = new AbortController()
+  const scopeSignal = sessionSignal()
+  const callerSignal = config.signal
+  const abort = () => controller.abort()
+  scopeSignal.addEventListener('abort', abort, { once: true })
+  callerSignal?.addEventListener?.('abort', abort, { once: true })
+  if (scopeSignal.aborted || callerSignal?.aborted) abort()
+  requests.set(config, {
+    version: sessionVersion.value,
+    dispose: () => {
+      scopeSignal.removeEventListener('abort', abort)
+      callerSignal?.removeEventListener?.('abort', abort)
+    },
+  })
+  config.signal = controller.signal
+  return config
+})
+
+function finishRequest(config?: InternalAxiosRequestConfig): boolean {
+  if (!config) return false
+  const request = requests.get(config)
+  request?.dispose()
+  requests.delete(config)
+  return request !== undefined && request.version !== sessionVersion.value
+}
+
 api.interceptors.response.use(
-  (response) => response,
+  (response) => {
+    if (finishRequest(response.config)) {
+      throw new axios.CanceledError('Session changed', response.config)
+    }
+    return response
+  },
   async (error) => {
+    // A response from a previous identity must never log out the current user.
+    if (finishRequest(error.config)) {
+      throw new axios.CanceledError('Session changed', error.config)
+    }
     const requestUrl: string = error.config?.url ?? ''
     const isSessionProbe = requestUrl.includes('/auth/me')
-    if (axios.isAxiosError(error) && error.response?.status === 401 && !isSessionProbe) {
-      const { state } = useAuth()
-      state.user = null
-      state.csrfToken = ''
+    const isLoginAttempt = requestUrl.includes('/auth/login')
+    if (axios.isAxiosError(error) && error.response?.status === 401 && !isSessionProbe && !isLoginAttempt) {
+      clearSession()
+      const version = sessionVersion.value
       const { router } = await import('@/router')
-      if (router.currentRoute.value.name !== 'login') {
+      if (version === sessionVersion.value && router.currentRoute.value.name !== 'login') {
         await router.push({
           name: 'login',
           query: { redirect: router.currentRoute.value.fullPath },

@@ -1,7 +1,9 @@
+import axios from 'axios'
 import { computed, reactive } from 'vue'
 
 import { api } from '@/api'
 import { isAdminRole, isOwnerRole } from '@/roles'
+import { resetSessionScope, sessionVersion } from '@/sessionScope'
 import type { User } from '@/types'
 
 interface AuthState {
@@ -17,17 +19,26 @@ const state = reactive<AuthState>({
 })
 
 function applySession(payload: { user: User; csrf_token: string }) {
+  resetSessionScope()
   state.user = payload.user
   state.csrfToken = payload.csrf_token
 }
 
+export function clearSession() {
+  resetSessionScope()
+  state.user = null
+  state.csrfToken = ''
+}
+
 export async function refreshSession(): Promise<void> {
+  const version = sessionVersion.value
   try {
     const { data } = await api.get<{ user: User; csrf_token: string }>('/auth/me')
+    if (version !== sessionVersion.value) return
     applySession(data)
-  } catch {
-    state.user = null
-    state.csrfToken = ''
+  } catch (error) {
+    if (version !== sessionVersion.value || axios.isCancel(error)) return
+    clearSession()
   } finally {
     state.initialized = true
   }
@@ -44,8 +55,12 @@ export async function login(email: string, password: string): Promise<void> {
 
 export async function logout(): Promise<void> {
   await api.post('/auth/logout', null, { headers: csrfHeaders() })
-  state.user = null
-  state.csrfToken = ''
+  clearSession()
+}
+
+export async function logoutAll(): Promise<void> {
+  await api.post('/auth/logout-all', null, { headers: csrfHeaders() })
+  clearSession()
 }
 
 export function csrfHeaders(): Record<string, string> {

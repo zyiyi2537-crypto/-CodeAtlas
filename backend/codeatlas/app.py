@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from threading import Event, Thread
@@ -26,6 +27,44 @@ from .retrieval import CodeRetriever
 from .settings import Settings
 
 logger = logging.getLogger(__name__)
+
+
+def run_source_sync(
+    engine,
+    stop_sync: Event,
+    coordinators: tuple[tuple[str, Callable[[], int]], ...],
+    submit_external_source: Callable[[str], None],
+) -> None:
+    while not stop_sync.is_set():
+        try:
+            for provider, check_enabled_sources in coordinators:
+                try:
+                    check_enabled_sources()
+                except Exception:
+                    logger.exception("%s source polling cycle failed", provider)
+            with Session(engine) as database:
+                due_sources = database.exec(
+                    select(ExternalSource).where(ExternalSource.enabled)
+                ).all()
+            now = datetime.now(UTC)
+            for source in due_sources:
+                checked = source.last_checked_at
+                if checked and checked.tzinfo is None:
+                    checked = checked.replace(tzinfo=UTC)
+                if checked and (now - checked).total_seconds() < max(
+                    300, source.poll_interval_seconds
+                ):
+                    continue
+                try:
+                    submit_external_source(source.id)
+                except RuntimeError:
+                    pass
+                except Exception:
+                    logger.error("External source polling failed: %s", source.id)
+        except Exception:
+            logger.error("Source polling cycle failed; retrying after 60 seconds")
+        # Use the normal polling interval as interruptible backoff after failures.
+        stop_sync.wait(60)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -64,37 +103,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 pass
         stop_sync = Event()
 
-        def run_source_sync() -> None:
-            coordinators = (
-                ("gitlab", gitlab_sync),
-                ("github", github_sync),
-            )
-            while not stop_sync.is_set():
-                for provider, coordinator in coordinators:
-                    try:
-                        coordinator.check_enabled_sources()
-                    except Exception:
-                        logger.exception("%s source polling cycle failed", provider)
-                with Session(engine) as database:
-                    due_sources = database.exec(
-                        select(ExternalSource).where(ExternalSource.enabled)
-                    ).all()
-                now = datetime.now(UTC)
-                for source in due_sources:
-                    checked = source.last_checked_at
-                    if checked and checked.tzinfo is None:
-                        checked = checked.replace(tzinfo=UTC)
-                    if checked and (now - checked).total_seconds() < max(
-                        300, source.poll_interval_seconds
-                    ):
-                        continue
-                    try:
-                        external_sync.submit(source.id)
-                    except RuntimeError:
-                        pass
-                stop_sync.wait(60)
-
-        sync_thread = Thread(target=run_source_sync, name="codeatlas-source-sync", daemon=True)
+        sync_thread = Thread(
+            target=run_source_sync,
+            args=(
+                engine,
+                stop_sync,
+                (
+                    ("gitlab", gitlab_sync.check_enabled_sources),
+                    ("github", github_sync.check_enabled_sources),
+                ),
+                external_sync.submit,
+            ),
+            name="codeatlas-source-sync",
+            daemon=True,
+        )
         sync_thread.start()
         async with mcp_raw_app.router.lifespan_context(mcp_raw_app):
             yield

@@ -6,6 +6,7 @@ import os
 import re
 import secrets
 import socket
+from collections.abc import Iterator
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -13,32 +14,75 @@ from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerifyMismatchError
 
 _PASSWORD_HASHER = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=2)
+_SECRET_LABEL = (
+    r"password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key"
+)
+_SECRET_VALUE = (
+    r'"(?P<double_value>(?:\\[^\r\n]|[^"\\\r\n])*)"'
+    r"|'(?P<single_value>(?:\\[^\r\n]|[^'\\\r\n])*)'"
+    r"|(?P<bare_value>(?!\[REDACTED(?: PRIVATE KEY)?\])[^\s,;#\"'\[\]{}()<>。，；]+)"
+)
 _ASSIGNMENT = re.compile(
-    r"(?i)(\b(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)\b"
-    r"\s*[:=]\s*)([^\s,;#]+)"
+    rf"\b(?:{_SECRET_LABEL})\b[\"']?[ \t]*[:=][ \t]*(?:{_SECRET_VALUE})",
+    re.IGNORECASE,
 )
 _PEM_BLOCK = re.compile(r"-----BEGIN [^-]+-----.*?-----END [^-]+-----", re.DOTALL)
-_URL_CREDENTIALS = re.compile(r"(mysql|postgres|postgresql|mongodb|redis|https?)(\+[a-z]+)?://[^@]+@")
-_BEARER_TOKEN = re.compile(r"(?i)bearer\s+[a-zA-Z0-9_\-\.=]{20,}")
-_API_KEY_PATTERN = re.compile(r"(?i)(sk|pk|api|key|token|secret)[_-][a-zA-Z0-9]{20,}")
+_URL_CREDENTIALS = re.compile(
+    r"(?:mysql|postgres|postgresql|mongodb|redis|https?)(?:\+[a-z]+)?://"
+    r"(?P<value>[^/@\s]+)@",
+    re.IGNORECASE,
+)
+_BEARER_TOKEN = re.compile(
+    r"\bbearer[ \t]+(?P<value>[a-zA-Z0-9_\-.~+/=]{20,})", re.IGNORECASE
+)
+_API_KEY_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_])(?:sk|pk|api|key|token|secret)[_-][A-Za-z0-9]{20,}[A-Za-z0-9_-]*"
+    r"(?![A-Za-z0-9_-])",
+    re.IGNORECASE,
+)
 _NATURAL_LANGUAGE_SECRET = re.compile(
-    r"(?i)(?P<label>my\s+password|password|passwd|pwd|api[ _-]?key|"
+    r"(?P<label>\bmy[ \t]+password|\bpassword|\bpasswd|\bpwd|\bapi[ _-]?key|"
     r"access[ _-]?key|secret|token|密码|口令|密钥)"
-    r"\s*(?:is|为|是|[:=])\s*[\"']?(?P<value>[^\s,;#\"'。]{6,})"
+    rf"[ \t]*(?:is\b|为|是|[:=])[ \t]*(?:{_SECRET_VALUE})",
+    re.IGNORECASE,
 )
-_GITHUB_TOKEN = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,})\b")
-_GITLAB_TOKEN = re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}\b")
-_OPENAI_PROJECT_KEY = re.compile(r"\bsk-proj-[A-Za-z0-9_-]{20,}\b")
-_STRIPE_KEY = re.compile(r"\b(?:sk|pk)_(?:live|test)_[A-Za-z0-9]{16,}\b")
-_HUGGINGFACE_TOKEN = re.compile(r"\bhf_[A-Za-z0-9]{20,}\b")
-_GOOGLE_API_KEY = re.compile(r"\bAIza[A-Za-z0-9_-]{30,}\b")
+_GITHUB_TOKEN = re.compile(
+    r"\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,})(?![A-Za-z0-9_])"
+)
+_GITLAB_TOKEN = re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])")
+_OPENAI_PROJECT_KEY = re.compile(
+    r"\bsk-(?:proj|svcacct)-[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])"
+)
+_STRIPE_KEY = re.compile(r"\b(?:sk|pk)_(?:live|test)_[A-Za-z0-9]{16,}(?![A-Za-z0-9])")
+_HUGGINGFACE_TOKEN = re.compile(r"\bhf_[A-Za-z0-9]{20,}(?![A-Za-z0-9])")
+_GOOGLE_API_KEY = re.compile(r"\bAIza[A-Za-z0-9_-]{30,}(?![A-Za-z0-9_-])")
 _AZURE_ACCOUNT_KEY = re.compile(
-    r"(?i)\bAccountKey\s*=\s*[A-Za-z0-9+/]{32,}={0,2}"
+    r"\bAccountKey[ \t]*=[ \t]*(?P<value>[A-Za-z0-9+/]{32,}={0,2})", re.IGNORECASE
 )
-_AWS_ACCESS_KEY = re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")
-_SLACK_TOKEN = re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b")
+_AWS_ACCESS_KEY = re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9_])")
+_SLACK_TOKEN = re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}(?![A-Za-z0-9-])")
 _JWT_TOKEN = re.compile(
-    r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"
+    r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
+    r"(?![A-Za-z0-9_-])"
+)
+_SECRET_PATTERNS = (
+    _PEM_BLOCK,
+    _URL_CREDENTIALS,
+    _BEARER_TOKEN,
+    _API_KEY_PATTERN,
+    _GITHUB_TOKEN,
+    _GITLAB_TOKEN,
+    _OPENAI_PROJECT_KEY,
+    _STRIPE_KEY,
+    _HUGGINGFACE_TOKEN,
+    _GOOGLE_API_KEY,
+    _AZURE_ACCOUNT_KEY,
+    _AWS_ACCESS_KEY,
+    _SLACK_TOKEN,
+    _JWT_TOKEN,
+)
+_SAFE_SECRET_VALUES = frozenset(
+    {"argon2", "bcrypt", "scrypt", "vault", "[redacted]", "[redacted private key]"}
 )
 _SSH_GIT_URL = re.compile(
     r"^git@(?P<host>[A-Za-z0-9.-]+):"
@@ -84,59 +128,55 @@ def mask_credential_ref(value: str) -> str:
     return "已配置" if value.strip() else "未配置"
 
 
-def redact_secrets(text: str) -> str:
-    def redact_pem(match: re.Match[str]) -> str:
-        return "[REDACTED PRIVATE KEY]" + "\n" * match.group(0).count("\n")
+def _secret_spans(text: str) -> Iterator[tuple[int, int]]:
+    for pattern in _SECRET_PATTERNS:
+        for match in pattern.finditer(text):
+            group = "value" if "value" in pattern.groupindex else 0
+            if match.group(group).lower() not in _SAFE_SECRET_VALUES:
+                yield match.span(group)
+    for pattern in (_ASSIGNMENT, _NATURAL_LANGUAGE_SECRET):
+        for match in pattern.finditer(text):
+            group = next(
+                name for name in ("double_value", "single_value", "bare_value")
+                if match.group(name) is not None
+            )
+            value = match.group(group)
+            if not value or value.lower() in _SAFE_SECRET_VALUES:
+                continue
+            if pattern is _ASSIGNMENT:
+                yield match.span(group)
+                continue
+            label = match.group("label").lower()
+            if len(value) >= 6 and (
+                label.startswith("my ")
+                or label in {"密码", "口令", "密钥"}
+                or len(value) >= 16
+                or any(character.isdigit() or character in "_-./+=" for character in value)
+            ):
+                yield match.span(group)
 
-    text = _PEM_BLOCK.sub(redact_pem, text)
-    text = _URL_CREDENTIALS.sub(r"\1://[REDACTED]@", text)
-    text = _BEARER_TOKEN.sub("Bearer [REDACTED]", text)
-    text = _API_KEY_PATTERN.sub(r"\1_[REDACTED]", text)
-    return _ASSIGNMENT.sub(r"\1[REDACTED]", text)
+
+def redact_secrets(text: str) -> str:
+    # Match the original text so overlapping formats cannot leave credential fragments.
+    spans: list[tuple[int, int]] = []
+    for start, end in sorted(_secret_spans(text)):
+        if spans and start <= spans[-1][1]:
+            spans[-1] = (spans[-1][0], max(spans[-1][1], end))
+        else:
+            spans.append((start, end))
+    parts: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        parts.extend((text[cursor:start], "[REDACTED]"))
+        parts.append("".join(character for character in text[start:end] if character in "\r\n"))
+        cursor = end
+    parts.append(text[cursor:])
+    return "".join(parts)
 
 
 def contains_secret(text: str) -> bool:
     """Return True when user-managed text contains a credential-like value."""
-
-    if (
-        _PEM_BLOCK.search(text)
-        or _URL_CREDENTIALS.search(text)
-        or _BEARER_TOKEN.search(text)
-        or _API_KEY_PATTERN.search(text)
-    ):
-        return True
-    if any(
-        pattern.search(text)
-        for pattern in (
-            _GITHUB_TOKEN,
-            _GITLAB_TOKEN,
-            _OPENAI_PROJECT_KEY,
-            _STRIPE_KEY,
-            _HUGGINGFACE_TOKEN,
-            _GOOGLE_API_KEY,
-            _AZURE_ACCOUNT_KEY,
-            _AWS_ACCESS_KEY,
-            _SLACK_TOKEN,
-            _JWT_TOKEN,
-        )
-    ):
-        return True
-    for match in _ASSIGNMENT.finditer(text):
-        value = match.group(2).strip("\"'")
-        if value.lower() not in {"argon2", "bcrypt", "scrypt", "vault"}:
-            return True
-    for match in _NATURAL_LANGUAGE_SECRET.finditer(text):
-        label = match.group("label").lower()
-        value = match.group("value")
-        if value.lower() in {"argon2", "bcrypt", "scrypt", "vault"}:
-            continue
-        if label.startswith("my ") or label in {"密码", "口令", "密钥"}:
-            return True
-        if len(value) >= 16 or any(character.isdigit() for character in value):
-            return True
-        if any(character in "_-./+=" for character in value):
-            return True
-    return False
+    return next(_secret_spans(text), None) is not None
 
 
 def validate_repository_name(name: str) -> str:

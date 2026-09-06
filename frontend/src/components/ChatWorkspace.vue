@@ -265,7 +265,7 @@ function openCitation(citation: ChatCitation) {
   previewResult.value = {
     repo: citation.repo,
     generation_id: '',
-    commit: '',
+    commit: citation.commit ?? '',
     path: citation.path,
     language: '',
     symbol: citation.symbol,

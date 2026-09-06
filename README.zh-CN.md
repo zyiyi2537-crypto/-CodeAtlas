@@ -2,6 +2,8 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
+[项目说明书](docs/project-manual.zh-CN.md) | [本次优化与验证记录](docs/optimization-validation-2026-09-06.zh-CN.md)
+
 CodeAtlas 是面向研发团队内部代码资产的知识与理解层。它连接 GitHub、GitLab 和项目文档，通过权限感知的混合 RAG 提供可验证的代码检索与问答，并以只读 MCP 服务将公司工程规范和既有实现安全地提供给 Codex 等编码代理。
 
 公开部署仅作为受控评估环境，只索引少量采用宽松许可证的开源仓库。私有代码和现有本地 Chroma 数据绝不会导入公开环境。

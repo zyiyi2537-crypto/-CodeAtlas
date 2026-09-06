@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { useQuery } from '@tanstack/vue-query'
-import { Copy, ExternalLink, X } from 'lucide-vue-next'
+import { Copy, X } from 'lucide-vue-next'
 import { computed } from 'vue'
 
-import { api } from '@/api'
+import { api, errorMessage } from '@/api'
 import { shortCommit } from '@/format'
 import type { FilePreview, SearchResult } from '@/types'
 
@@ -13,25 +13,36 @@ const emit = defineEmits<{ close: [] }>()
 const queryKey = computed(() => [
   'file',
   props.result.repo,
+  props.result.commit,
   props.result.path,
   props.result.start_line,
+  props.result.end_line,
 ])
 
 const preview = useQuery({
   queryKey,
-  queryFn: async () => {
-    const start = Math.max(1, props.result.start_line - 20)
-    const end = Math.min(start + 199, props.result.end_line + 40)
+  queryFn: async ({ signal }) => {
+    const result = props.result
+    const start = Math.max(1, result.start_line - 20)
+    const end = Math.min(start + 199, result.end_line + 40)
     const { data } = await api.get<FilePreview>(
-      `/repositories/${props.result.repo}/file`,
-      { params: { path: props.result.path, start_line: start, end_line: end } },
+      `/repositories/${result.repo}/file`,
+      {
+        params: { path: result.path, start_line: start, end_line: end, commit: result.commit || undefined },
+        signal,
+      },
     )
+    if (result.commit && data.commit !== result.commit) {
+      throw new Error('引用版本已更新，无法显示原版本源码，请重新检索。')
+    }
     return data
   },
 })
 
 async function copyCode() {
-  if (preview.data.value?.content) await navigator.clipboard.writeText(preview.data.value.content)
+  if (!preview.error.value && preview.data.value?.content) {
+    await navigator.clipboard.writeText(preview.data.value.content)
+  }
 }
 
 function closePreview() {
@@ -45,7 +56,7 @@ function closePreview() {
       <header class="preview-header">
         <div>
           <strong>{{ result.path }}</strong>
-          <span>{{ shortCommit(result.commit) }} · L{{ result.start_line }}–{{ result.end_line }}</span>
+          <span>{{ shortCommit(result.commit || preview.data.value?.commit || '') }} · L{{ result.start_line }}–{{ result.end_line }}</span>
         </div>
         <div class="preview-actions">
           <button
@@ -53,20 +64,11 @@ function closePreview() {
             type="button"
             data-tooltip="复制代码"
             aria-label="复制代码"
+            :disabled="!preview.data.value || !!preview.error.value"
             @click="copyCode"
           >
             <Copy :size="17" />
           </button>
-          <a
-            class="icon-button tooltip"
-            :href="`https://github.com/search?q=${encodeURIComponent(result.path)}`"
-            target="_blank"
-            rel="noreferrer"
-            data-tooltip="在上游查找"
-            aria-label="在上游查找"
-          >
-            <ExternalLink :size="17" />
-          </a>
           <button
             class="icon-button tooltip"
             type="button"
@@ -79,8 +81,8 @@ function closePreview() {
         </div>
       </header>
       <div v-if="preview.isPending.value" class="loading-block">正在读取文件…</div>
+      <div v-else-if="preview.error.value" class="error-banner" role="alert">{{ errorMessage(preview.error.value) }}</div>
       <pre v-else-if="preview.data.value" class="source-code"><code>{{ preview.data.value.content }}</code></pre>
-      <div v-else class="error-banner">文件读取失败</div>
     </section>
   </div>
 </template>

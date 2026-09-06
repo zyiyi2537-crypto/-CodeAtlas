@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DATA_DIR=${CODEATLAS_DATA_DIR:-/var/lib/codeatlas}
-APP_DIR=${CODEATLAS_APP_DIR:-/opt/codeatlas}
-BACKUP_DIR=${CODEATLAS_BACKUP_DIR:-/var/backups/codeatlas}
+ENV_FILE=${CODEATLAS_ENV_FILE:-/etc/codeatlas/codeatlas.env}
 MAINTENANCE_LOCK=/run/lock/codeatlas-maintenance.lock
 STAMP=""
 BACKUP_ID=""
@@ -37,6 +35,19 @@ if [[ ${CODEATLAS_MAINTENANCE_LOCK_HELD:-0} != 1 ]]; then
   fi
 fi
 
+set -a
+# shellcheck disable=SC1090
+. "$ENV_FILE"
+set +a
+DATA_DIR=${CODEATLAS_DATA_DIR:-/var/lib/codeatlas}
+APP_DIR=${CODEATLAS_APP_DIR:-/opt/codeatlas}
+BACKUP_DIR=${CODEATLAS_BACKUP_DIR:-/var/backups/codeatlas}
+export CODEATLAS_DATA_DIR="$DATA_DIR"
+if [[ ! -d "$DATA_DIR/chroma" ]]; then
+  echo "Required Chroma data directory is missing: $DATA_DIR/chroma" >&2
+  exit 1
+fi
+
 install -d -m 0750 "$BACKUP_DIR"
 STAMP=$(date -u +%Y%m%d-%H%M%S)
 STAGE=$(mktemp -d "$BACKUP_DIR/.stage-${STAMP}-XXXXXXXX")
@@ -49,10 +60,6 @@ if systemctl is-active --quiet codeatlas; then
   systemctl stop codeatlas
 fi
 
-set -a
-# shellcheck disable=SC1091
-. /etc/codeatlas/codeatlas.env
-set +a
 MYSQL_CNF=$(mktemp "$BACKUP_DIR/.mysql-client.XXXXXX")
 MYSQL_DATABASE_FILE=$(mktemp "$BACKUP_DIR/.mysql-database.XXXXXX")
 "$APP_DIR/backend/.venv/bin/python" - "$MYSQL_CNF" "$MYSQL_DATABASE_FILE" <<'PY'
@@ -86,9 +93,7 @@ mysqldump --defaults-extra-file="$MYSQL_CNF" \
   --single-transaction --routines --triggers --hex-blob \
   --set-gtid-purged=OFF --no-tablespaces --column-statistics=0 \
   "$MYSQL_DATABASE" > "$STAGE/codeatlas.sql"
-if [[ -d "$DATA_DIR/chroma" ]]; then
-  cp -a "$DATA_DIR/chroma" "$STAGE/chroma"
-fi
+cp -a "$DATA_DIR/chroma" "$STAGE/chroma"
 if [[ -d "$DATA_DIR/documents" ]]; then
   cp -a "$DATA_DIR/documents" "$STAGE/documents"
 fi
@@ -99,19 +104,21 @@ if [[ -d "$APP_DIR/blog/src/content" ]]; then
   install -d "$STAGE/blog"
   cp -a "$APP_DIR/blog/src/content" "$STAGE/blog/content"
 fi
-install -m 0640 /etc/codeatlas/codeatlas.env "$STAGE/codeatlas.env"
-"$APP_DIR/backend/.venv/bin/python" - "$STAGE/repositories.json" <<'PY'
+install -m 0640 "$ENV_FILE" "$STAGE/codeatlas.env"
+"$APP_DIR/backend/.venv/bin/python" - "$STAGE/repositories.json" "$DATA_DIR" "$STAGE" <<'PY'
 import json
 import sys
 from pathlib import Path
 
+from cryptography.fernet import Fernet, InvalidToken
 from sqlmodel import Session, select
 
 from codeatlas.database import create_database
-from codeatlas.models import Repository
+from codeatlas.models import Document, EmbeddingProfile, LlmProvider, Repository
 from codeatlas.settings import Settings
 
-output_path = sys.argv[1]
+output_path, data_dir, stage = map(Path, sys.argv[1:])
+documents_dir = (data_dir / "documents").resolve()
 columns = (
     "name",
     "description",
@@ -125,11 +132,33 @@ columns = (
 engine = create_database(Settings.load())
 with Session(engine) as session:
     repositories = session.exec(select(Repository).order_by(Repository.name)).all()
+    for document in session.exec(select(Document)).all():
+        try:
+            relative_path = Path(document.source_path).resolve().relative_to(documents_dir)
+        except ValueError:
+            raise SystemExit("A document source is outside the backed-up data directory") from None
+        archived_document = stage / "documents" / relative_path
+        if not archived_document.is_file():
+            raise SystemExit("A required document source is missing from the backup")
+    for model in (EmbeddingProfile, LlmProvider):
+        ciphertexts = session.exec(
+            select(model.api_key_ciphertext).where(model.api_key_ciphertext != "")
+        ).all()
+        if not ciphertexts:
+            continue
+        try:
+            cipher = Fernet((stage / "provider-credentials.key").read_bytes().strip())
+            for ciphertext in ciphertexts:
+                cipher.decrypt(ciphertext.encode("ascii"))
+        except (OSError, ValueError, InvalidToken):
+            raise SystemExit(
+                "Required provider credentials cannot be restored from the backup"
+            ) from None
 payload = [
     {column: getattr(repository, column) for column in columns}
     for repository in repositories
 ]
-Path(output_path).write_text(
+output_path.write_text(
     json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
     encoding="utf-8",
 )

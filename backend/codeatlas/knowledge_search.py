@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 
 from sqlalchemy import text
@@ -8,11 +9,13 @@ from sqlmodel import Session, col, select
 
 from .authorization import AuthorizationScope
 from .documents import StructuredBlock, split_structured_blocks
-from .embeddings import EmbeddingClient
+from .embeddings import EmbeddingClient, EmbeddingUnavailableError
 from .models import Document, DocumentChunkRecord, EmbeddingProfile, WikiPage
 from .ranking import RRF_K
 from .settings import Settings
 from .vector_store import KnowledgeVectorChunk, VectorStore
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -423,10 +426,16 @@ class KnowledgeSearch:
             scoped_space_ids,
         )
         candidate_limit = max(limit * 3, 20)
-        query_embedding = context.embedder.embed([query])[0]
+        degraded = False
+        try:
+            query_embedding = context.embedder.embed_query(query)
+        except EmbeddingUnavailableError:
+            logger.warning("Knowledge retrieval using lexical fallback: embedding unavailable")
+            query_embedding = None
+            degraded = True
         vector: list[dict] = []
         for source_type in ("document", "wiki"):
-            if source_type not in wanted:
+            if source_type not in wanted or query_embedding is None:
                 continue
             lane = context.vector_store.search_knowledge(
                 query_embedding,
@@ -505,6 +514,9 @@ class KnowledgeSearch:
                 else "vector" if vector_score else "lexical"
             )
             item["score"] = float(item["rrf_score"])
+            if degraded:
+                item["degraded"] = True
+                item["degradation_reason"] = "embedding_unavailable"
         return sorted(pool.values(), key=lambda item: item["score"], reverse=True)[:limit]
 
     @staticmethod

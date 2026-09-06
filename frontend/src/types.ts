@@ -170,6 +170,7 @@ export interface FilePreview {
 
 export interface ChatCitation {
   source_type: 'code' | 'document' | 'wiki'
+  commit?: string
   source_id: string
   title: string
   section: string

@@ -75,6 +75,7 @@ class ChatService:
             limit=8,
             authorization_scope=authorization_scope,
         )
+        _, evidence = self._evidence_context(evidence)
         messages = self._build_messages(
             question,
             evidence,
@@ -94,27 +95,7 @@ class ChatService:
         history: list[dict],
         memories: list[str] | None = None,
     ) -> list[dict]:
-        context_parts: list[str] = []
-        budget = _MAX_CONTEXT_CHARS
-        for index, item in enumerate(evidence, start=1):
-            source_type = item.get("source_type", "code")
-            snippet = str(item.get("content") or item.get("snippet") or "")
-            block = (
-                f"[{index}] source={source_type} title={item.get('title', '')} "
-                f"section={item.get('section', '')} path={item.get('path', '')} "
-                f"page={item.get('page') or '-'} lines="
-                f"{item.get('start_line', 0)}-{item.get('end_line', 0)} "
-                f"structure={item.get('structure_type', '')} "
-                f"sheet={item.get('sheet', '')} rows="
-                f"{item.get('row_start') or '-'}-{item.get('row_end') or '-'} "
-                f"slide={item.get('slide') or '-'}\n{snippet}"
-            )
-            if len(block) > budget:
-                break
-            context_parts.append(block)
-            budget -= len(block)
-        context = "\n\n".join(context_parts) or "(no matching evidence found)"
-
+        context, _ = self._evidence_context(evidence)
         messages: list[dict] = [{"role": "system", "content": _SYSTEM_PROMPT}]
         for turn in history[-_MAX_HISTORY:]:
             role = turn.get("role")
@@ -138,6 +119,33 @@ class ChatService:
             ),
         })
         return messages
+
+    @staticmethod
+    def _evidence_context(evidence: list[dict]) -> tuple[str, list[dict]]:
+        context_parts: list[str] = []
+        included: list[dict] = []
+        budget = _MAX_CONTEXT_CHARS
+        for item in evidence:
+            index = len(included) + 1
+            source_type = item.get("source_type", "code")
+            snippet = str(item.get("content") or item.get("snippet") or "")
+            block = (
+                f"[{index}] source={source_type} title={item.get('title', '')} "
+                f"section={item.get('section', '')} path={item.get('path', '')} "
+                f"page={item.get('page') or '-'} lines="
+                f"{item.get('start_line', 0)}-{item.get('end_line', 0)} "
+                f"structure={item.get('structure_type', '')} "
+                f"sheet={item.get('sheet', '')} rows="
+                f"{item.get('row_start') or '-'}-{item.get('row_end') or '-'} "
+                f"slide={item.get('slide') or '-'}\n{snippet}"
+            )
+            if len(block) > budget:
+                continue
+            context_parts.append(block)
+            included.append(item)
+            budget -= len(block) + 2
+        context = "\n\n".join(context_parts) or "(no matching evidence found)"
+        return context, included
 
     def _complete(self, messages: list[dict]) -> str:
         response = httpx.post(
@@ -163,6 +171,7 @@ class ChatService:
     @staticmethod
     def _citation(item: dict) -> dict:
         return {
+            **({"commit": item.get("commit", "")} if item.get("commit") else {}),
             "source_type": item.get("source_type", "code"),
             "source_id": item.get("source_id", item.get("repo", "")),
             "title": item.get("title", item.get("path", "")),

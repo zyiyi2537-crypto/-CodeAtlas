@@ -4,6 +4,7 @@ import { createApp } from 'vue'
 import App from '@/App.vue'
 import { modalDialog } from '@/modalDialog'
 import { router } from '@/router'
+import { queryClient } from '@/sessionScope'
 import '@fontsource/ibm-plex-mono/400.css'
 import '@fontsource/ibm-plex-mono/500.css'
 import '@fontsource/noto-serif-sc/600.css'
@@ -13,5 +14,5 @@ import '@/style.css'
 createApp(App)
   .directive('modal-dialog', modalDialog)
   .use(router)
-  .use(VueQueryPlugin)
+  .use(VueQueryPlugin, { queryClient })
   .mount('#app')

@@ -89,6 +89,7 @@ function mountChat(role: 'admin' | 'member') {
   })
   return mount(ChatView, {
     global: {
+      directives: { modalDialog: {} },
       plugins: [[VueQueryPlugin, { queryClient }]],
     },
   })
@@ -179,6 +180,47 @@ describe('ChatView account workspace', () => {
       { kind: 'constraint', content: '回答必须附带来源。' },
       { headers: { 'X-CSRF-Token': 'csrf-test' } },
     )
+  })
+
+  it('passes the original commit when opening a code citation from history', async () => {
+    apiGet.mockImplementation(async (url: string) => {
+      if (url === '/chat/sessions/session-1') {
+        return {
+          data: {
+            ...sessionSummary,
+            messages: [{
+              id: 'cited-answer', role: 'assistant', content: 'Code reference',
+              created_at: sessionSummary.created_at,
+              citations: [{
+                source_type: 'code', repo: 'repo-1', commit: 'original-commit',
+                path: 'src/auth.ts', symbol: 'login', start_line: 25, end_line: 30,
+              }],
+            }],
+          },
+        }
+      }
+      if (url === '/repositories/repo-1/file') {
+        return {
+          data: {
+            repo: 'repo-1', commit: 'original-commit', path: 'src/auth.ts',
+            start_line: 5, end_line: 70, content: 'original source',
+          },
+        }
+      }
+      return { data: responseFor(url) }
+    })
+    const wrapper = mountChat('member')
+    await flushPromises()
+    await flushPromises()
+    await wrapper.get('.citation-chip').trigger('click')
+    await flushPromises()
+
+    expect(apiGet).toHaveBeenCalledWith('/repositories/repo-1/file', {
+      params: { path: 'src/auth.ts', start_line: 5, end_line: 70, commit: 'original-commit' },
+      signal: expect.any(AbortSignal),
+    })
+    expect(wrapper.get('.source-code').text()).toContain('original source')
+    wrapper.unmount()
   })
 
   it('creates a persistent conversation before sending the first message', async () => {
