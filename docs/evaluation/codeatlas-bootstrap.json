@@ -1,0 +1,14 @@
+{
+  "benchmark_type": "bootstrap-self-repository",
+  "description": "Small author-curated CodeAtlas source smoke set, not an unbiased benchmark. Symbol-bearing questions favor lexical retrieval. The absent-token query is a synthetic empty-expected control, not authorization proof.",
+  "queries": [
+    {"id": "tokenization", "query": "tokenize camelCase 中文 bigrams", "expected": [{"repo": "CodeAtlas", "path": "backend/codeatlas/ranking.py", "symbol": "tokenize", "start_line": 12, "end_line": 29}]},
+    {"id": "fusion", "query": "fuse_and_rerank reciprocal rank fusion per file overlap", "expected": [{"repo": "CodeAtlas", "path": "backend/codeatlas/ranking.py", "symbol": "fuse_and_rerank", "start_line": 32, "end_line": 83}]},
+    {"id": "cross-source", "query": "rerank_across_source_types code document wiki normalization", "expected": [{"repo": "CodeAtlas", "path": "backend/codeatlas/ranking.py", "symbol": "rerank_across_source_types", "start_line": 86, "end_line": 128}]},
+    {"id": "repository-access", "query": "allowed_repositories visibility public grants authorization_scope", "expected": [{"repo": "CodeAtlas", "path": "backend/codeatlas/retrieval.py", "symbol": "allowed_repositories", "start_line": 46, "end_line": 95}]},
+    {"id": "path-boundary", "query": "resolve_repository_file path escapes repository root", "expected": [{"repo": "CodeAtlas", "path": "backend/codeatlas/security.py", "symbol": "resolve_repository_file", "start_line": 239, "end_line": 250}]},
+    {"id": "line-windows", "query": "line_windows max_chars overlap cursor", "expected": [{"repo": "CodeAtlas", "path": "backend/codeatlas/chunker.py", "symbol": "line_windows", "start_line": 109, "end_line": 124}]},
+    {"id": "two-definitions", "query": "tokenize and line_windows definitions", "expected": [{"repo": "CodeAtlas", "path": "backend/codeatlas/ranking.py", "symbol": "tokenize", "start_line": 12, "end_line": 29}, {"repo": "CodeAtlas", "path": "backend/codeatlas/chunker.py", "symbol": "line_windows", "start_line": 109, "end_line": 124}]},
+    {"id": "absent-token-control", "query": "zzzzabsentsymbolzzzz", "expected": [], "forbidden": [{"repo": "CodeAtlas", "path": "backend/codeatlas/security.py"}], "note": "Synthetic nonmatch/forbidden-evidence plumbing check only; no ACL is executed."}
+  ]
+}

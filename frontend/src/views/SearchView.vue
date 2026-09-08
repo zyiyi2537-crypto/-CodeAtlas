@@ -151,6 +151,18 @@ function submitSearch() {
         <h2>{{ searchMutation.data.value.length }} 个结果</h2>
         <span>“{{ searchedQuery }}”</span>
       </div>
+      <p
+        v-if="searchMutation.isSuccess.value && searchMutation.data.value.some((result) => result.degraded === true)"
+        class="retrieval-status"
+        role="status"
+      >
+        <template
+          v-if="searchMutation.data.value.some((result) => result.degraded === true && result.degradation_reason === 'embedding_unavailable')"
+        >
+          检索已降级：向量服务暂不可用，已使用关键词检索，结果可能不完整。
+        </template>
+        <template v-else>检索已降级，结果可能不完整。</template>
+      </p>
       <div v-if="searchMutation.data.value.length" class="result-list">
         <button
           v-for="result in searchMutation.data.value"
@@ -213,3 +225,13 @@ function submitSearch() {
     />
   </div>
 </template>
+
+<style scoped>
+.retrieval-status {
+  padding: 12px 16px;
+  border: 1px solid var(--amber);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--surface);
+}
+</style>

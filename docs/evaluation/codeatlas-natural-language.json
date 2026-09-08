@@ -1,0 +1,12 @@
+{
+  "benchmark_type": "bootstrap-self-repository-natural-language",
+  "description": "人工依据源码编写的中文问题，不含目标函数名；不是独立用户评测或生产混合检索评测。与 symbol bootstrap 使用同一源码语料比较，不根据结果调整期望答案。",
+  "queries": [
+    {"id": "zh-tokenization", "query": "搜索词里的中文和驼峰命名如何被拆分？", "expected": [{"repo": "CodeAtlas", "path": "backend/codeatlas/ranking.py", "start_line": 12, "end_line": 29}]},
+    {"id": "zh-fusion", "query": "关键词与向量检索的结果如何合并，并避免同一个文件占满结果？", "expected": [{"repo": "CodeAtlas", "path": "backend/codeatlas/ranking.py", "start_line": 32, "end_line": 83}]},
+    {"id": "zh-access", "query": "用户能够搜索哪些代码仓库，访问范围在哪里判断？", "expected": [{"repo": "CodeAtlas", "path": "backend/codeatlas/retrieval.py", "start_line": 46, "end_line": 95}]},
+    {"id": "zh-path", "query": "读取文件时如何防止路径跳出仓库目录？", "expected": [{"repo": "CodeAtlas", "path": "backend/codeatlas/security.py", "start_line": 239, "end_line": 250}]},
+    {"id": "zh-sources", "query": "代码、文档与知识页面的原始分数不一样，统一搜索怎么排序？", "expected": [{"repo": "CodeAtlas", "path": "backend/codeatlas/ranking.py", "start_line": 86, "end_line": 128}]},
+    {"id": "zh-windows", "query": "超长文本按行切块时如何保留相邻片段的重叠内容？", "expected": [{"repo": "CodeAtlas", "path": "backend/codeatlas/chunker.py", "start_line": 109, "end_line": 124}]}
+  ]
+}

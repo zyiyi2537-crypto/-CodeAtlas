@@ -156,6 +156,8 @@ export interface SearchResult {
   vector_score: number
   lexical_score: number
   retrieval: 'hybrid' | 'vector' | 'lexical'
+  degraded?: boolean
+  degradation_reason?: string
   snippet: string
 }
 
