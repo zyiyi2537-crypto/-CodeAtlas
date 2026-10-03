@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
@@ -101,6 +102,11 @@ class IndexCoordinator:
                     select(GitHubSource).where(GitHubSource.repository_id == repository.id)
                 ).first()
                 ssh_key_path = github_source.ssh_key_path if github_source else ""
+                include_paths = (
+                    json.loads(github_source.include_paths_json or "[]")
+                    if github_source
+                    else []
+                )
                 embedding_profile = session.exec(
                     select(EmbeddingProfile).where(EmbeddingProfile.is_active)
                 ).first()
@@ -137,7 +143,12 @@ class IndexCoordinator:
                 embedding_namespace, generation_id
             )
             self._progress(job_id, 25, "Chunking source files")
-            files = source_files(root, LANGUAGES, self.settings.max_source_files)
+            files = source_files(
+                root,
+                LANGUAGES,
+                self.settings.max_source_files,
+                include_paths,
+            )
             chunks = []
             for path in files:
                 chunks.extend(chunk_file(path, root, repository_id, generation_id, commit))

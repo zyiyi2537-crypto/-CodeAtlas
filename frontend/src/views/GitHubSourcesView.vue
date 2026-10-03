@@ -29,6 +29,10 @@ const form = reactive<{
   poll_interval_seconds: number
   visibility: 'public' | 'private'
   description: string
+  include_paths_text: string
+  pinned_commit: string
+  license_name: string
+  license_url: string
 }>({
   name: '',
   repo_url: 'git@github.com:owner/repository.git',
@@ -36,6 +40,10 @@ const form = reactive<{
   poll_interval_seconds: 1800,
   visibility: 'private',
   description: '',
+  include_paths_text: '',
+  pinned_commit: '',
+  license_name: '',
+  license_url: '',
 })
 
 const sources = useQuery({
@@ -55,7 +63,16 @@ const generateKey = useMutation({
 const createSource = useMutation({
   mutationFn: async () => (
     await api.post('/github-sources', {
-      ...form,
+      name: form.name,
+      repo_url: form.repo_url,
+      branch: form.branch,
+      poll_interval_seconds: form.poll_interval_seconds,
+      visibility: form.visibility,
+      description: form.description,
+      include_paths: form.include_paths_text.split(/\r?\n/).map((value) => value.trim()).filter(Boolean),
+      pinned_commit: form.pinned_commit.trim(),
+      license_name: form.license_name.trim(),
+      license_url: form.license_url.trim(),
       ssh_key_id: form.visibility === 'private' ? generatedKey.value?.key_id : undefined,
     }, { headers: csrfHeaders() })
   ).data,
@@ -65,6 +82,8 @@ const createSource = useMutation({
     Object.assign(form, {
       name: '', repo_url: 'git@github.com:owner/repository.git', branch: 'main',
       poll_interval_seconds: 1800, visibility: 'private', description: '',
+      include_paths_text: '',
+      pinned_commit: '', license_name: '', license_url: '',
     })
     await queryClient.invalidateQueries({ queryKey: ['github-sources'] })
     await queryClient.invalidateQueries({ queryKey: ['repositories'] })
@@ -121,6 +140,9 @@ function closeDialog() {
             <strong>{{ source.name }}</strong>
             <small>{{ source.repo_url }}</small>
             <small>分支 {{ source.branch }} · {{ source.repository_status }}</small>
+            <small>索引范围 {{ source.include_paths.length ? source.include_paths.join(' · ') : '整个仓库' }}</small>
+            <small v-if="source.pinned_commit">固定提交 {{ source.pinned_commit }}</small>
+            <small v-if="source.license_name">许可证 {{ source.license_name }}</small>
             <small v-if="source.last_error" class="error-text">{{ source.last_error }}</small>
           </span>
           <span class="source-card-meta">
@@ -175,6 +197,17 @@ function closeDialog() {
           <label><span>检查间隔（秒）</span><input v-model.number="form.poll_interval_seconds" type="number" min="300" max="86400" required /></label>
           <label><span>可见性</span><select v-model="form.visibility" @change="normalizeCloneUrl"><option value="private">private</option><option value="public">public</option></select></label>
           <label class="full-span"><span>描述</span><textarea v-model="form.description" rows="2" /></label>
+          <label class="full-span">
+            <span>索引目录（可选，每行一个）</span>
+            <textarea v-model="form.include_paths_text" rows="4" placeholder="templates/website/src/Header&#10;templates/website/src/blocks&#10;templates/website/src/fields" />
+            <small class="form-hint">留空索引整个仓库；只索引选定目录可减少无关代码和 embedding 消耗。路径相对于仓库根目录，不支持通配符。</small>
+          </label>
+          <label class="full-span" v-if="form.visibility === 'public'">
+            <span>固定 Git 提交 SHA（可选）</span>
+            <input v-model="form.pinned_commit" maxlength="40" pattern="[0-9a-fA-F]{40}" placeholder="40 位 commit SHA" />
+          </label>
+          <label><span>许可证名称</span><input v-model="form.license_name" maxlength="100" placeholder="MIT" /></label>
+          <label><span>许可证链接</span><input v-model="form.license_url" maxlength="1000" type="url" placeholder="https://github.com/owner/repo/blob/main/LICENSE" /></label>
           <p class="form-hint full-span">{{ form.visibility === 'public' ? '公开仓库通过 HTTPS 只读同步，不需要密钥。' : '每个私有仓库使用独立 Deploy Key。私钥不会返回页面，也不会写入数据库。' }}</p>
           <div v-if="formError" class="error-banner full-span">{{ formError }}</div>
           <div class="form-actions full-span">

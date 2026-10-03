@@ -41,19 +41,20 @@ class GitHubSourceAdapter:
                 source.repo_url,
                 source.branch,
                 source.ssh_key_path,
+                source.pinned_commit,
                 repository.id,
                 repository.created_by,
                 repository.last_commit,
             )
         try:
-            commit = remote_commit(self.settings, config[0], config[1], config[2])
+            commit = config[3] or remote_commit(self.settings, config[0], config[1], config[2])
         except (ValueError, GitHubError) as exc:
             raise SourcePollingError(str(exc)) from exc
         return [
             SourceRevision(
-                repository_id=config[3],
-                created_by=config[4],
-                local_commit=config[5],
+                repository_id=config[4],
+                created_by=config[5],
+                local_commit=config[6],
                 remote_commit=commit,
                 message="Queued by GitHub commit check",
             )

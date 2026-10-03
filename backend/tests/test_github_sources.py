@@ -83,6 +83,7 @@ def test_public_github_source_accepts_https_without_deploy_key(
             "repo_url": "https://github.com/yt-dlp/yt-dlp.git",
             "branch": "master",
             "visibility": "public",
+            "include_paths": ["templates/website/src/Header/", "templates/website/src/blocks"],
         },
     )
 
@@ -91,6 +92,59 @@ def test_public_github_source_accepts_https_without_deploy_key(
     assert payload["repo_url"] == "https://github.com/yt-dlp/yt-dlp.git"
     assert payload["branch"] == "master"
     assert payload["deploy_key_configured"] is False
+    assert payload["include_paths"] == [
+        "templates/website/src/Header",
+        "templates/website/src/blocks",
+    ]
+    assert (
+        client.get("/api/v1/github-sources").json()[0]["include_paths"]
+        == payload["include_paths"]
+    )
+
+
+def test_github_source_rejects_unsafe_include_paths(client: TestClient, admin) -> None:
+    csrf = login_admin(client)
+    response = client.post(
+        "/api/v1/github-sources",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "name": "unsafe-scope",
+            "repo_url": "https://github.com/yt-dlp/yt-dlp.git",
+            "branch": "master",
+            "visibility": "public",
+            "include_paths": ["../outside"],
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_public_github_source_accepts_pinned_commit_and_license(
+    client: TestClient, admin, monkeypatch
+) -> None:
+    commit = "b" * 40
+    monkeypatch.setattr("codeatlas.api.validate_public_commit", lambda *_args: commit)
+    csrf = login_admin(client)
+    response = client.post(
+        "/api/v1/github-sources",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "name": "pinned-source",
+            "repo_url": "https://github.com/yt-dlp/yt-dlp.git",
+            "branch": "master",
+            "visibility": "public",
+            "pinned_commit": commit,
+            "license_name": "MIT",
+            "license_url": "https://github.com/yt-dlp/yt-dlp/blob/main/LICENSE",
+            "include_paths": ["templates/website"],
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    payload = response.json()
+    assert payload["pinned_commit"] == commit
+    assert payload["license_name"] == "MIT"
+    assert payload["license_url"].endswith("/LICENSE")
 
 
 def test_github_source_rejects_missing_branch_before_saving(

@@ -21,10 +21,30 @@ from codeatlas.models import (
     SQLModel,
     User,
 )
-from codeatlas.repositories import sync_repository
+from codeatlas.repositories import source_files, sync_repository
 from codeatlas.retrieval import CodeRetriever
 from codeatlas.settings import Settings
 from codeatlas.vector_store import VectorStore
+
+
+def test_source_file_path_scope_limits_indexed_files(tmp_path: Path) -> None:
+    selected = tmp_path / "templates/website/src/Header/Nav.tsx"
+    unrelated = tmp_path / "packages/payload/src/index.ts"
+    selected.parent.mkdir(parents=True)
+    unrelated.parent.mkdir(parents=True)
+    selected.write_text("export const Nav = () => null\n", encoding="utf-8")
+    unrelated.write_text("export const Payload = {}\n", encoding="utf-8")
+
+    files = source_files(
+        tmp_path,
+        {".tsx": "typescript", ".ts": "typescript"},
+        20,
+        ["templates/website/src/Header"],
+    )
+
+    assert files == [selected]
+    with pytest.raises(ValueError, match="safe repository-relative"):
+        source_files(tmp_path, {".ts": "typescript"}, 20, ["../packages"])
 
 
 def seed_job(engine, repository_name: str = "demo") -> tuple[Repository, IndexJob]:

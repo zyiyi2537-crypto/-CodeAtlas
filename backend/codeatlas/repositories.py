@@ -233,10 +233,35 @@ def directory_size(root: Path) -> int:
     return total
 
 
-def source_files(root: Path, languages: dict[str, str], max_files: int) -> list[Path]:
+def source_files(
+    root: Path,
+    languages: dict[str, str],
+    max_files: int,
+    include_paths: list[str] | None = None,
+) -> list[Path]:
+    normalized_paths = [value.strip().replace("\\", "/") for value in include_paths or []]
+    if any(
+        not value
+        or len(value) > 300
+        or value.startswith("/")
+        or (len(value.split("/")[0]) == 2 and value.split("/")[0][1] == ":")
+        or any(part in {"", ".", ".."} for part in value.split("/"))
+        or any("\x00" in part for part in value.split("/"))
+        or any(char in value for char in "*?[]{}")
+        or any(part.lower() in {".git", ".githooks"} for part in value.split("/"))
+        for value in normalized_paths
+    ):
+        raise ValueError("source include paths must be safe repository-relative paths")
     files: list[Path] = []
     for path in root.rglob("*"):
         if not path.is_file() or path.is_symlink():
+            continue
+        relative_path = path.relative_to(root).as_posix()
+        if normalized_paths and not any(
+            relative_path == prefix.rstrip("/")
+            or relative_path.startswith(f"{prefix.rstrip('/')}/")
+            for prefix in normalized_paths
+        ):
             continue
         relative_parts = path.relative_to(root).parts
         if any(part in EXCLUDED_DIRECTORIES for part in relative_parts[:-1]):

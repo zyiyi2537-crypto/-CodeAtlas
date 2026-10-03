@@ -13,7 +13,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
@@ -55,6 +55,7 @@ from .github import (
     remote_commit,
     repository_identity,
     resolve_deploy_key,
+    validate_public_commit,
 )
 from .gitlab import GitLabClient, GitLabClientError
 from .index_job_schedule_lock import (
@@ -282,6 +283,40 @@ class GitHubSourceCreate(BaseModel):
     poll_interval_seconds: int = Field(default=1800, ge=300, le=86400)
     visibility: str = "private"
     description: str = Field(default="", max_length=500)
+    include_paths: list[str] = Field(default_factory=list, max_length=64)
+    pinned_commit: str = Field(default="", pattern=r"^(|[0-9a-fA-F]{40})$")
+    license_name: str = Field(default="", max_length=100)
+    license_url: str = Field(default="", max_length=1000)
+
+    @field_validator("include_paths")
+    @classmethod
+    def validate_include_paths(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw in values:
+            value = raw.strip().replace("\\", "/")
+            if value.startswith("/"):
+                raise ValueError(
+                    "include_paths must be safe repository-relative paths without globs"
+                )
+            value = value.rstrip("/")
+            parts = value.split("/")
+            if (
+                not value
+                or len(value) > 300
+                or (len(parts[0]) == 2 and parts[0][1] == ":")
+                or any(part in {"", ".", ".."} for part in parts)
+                or any("\x00" in part for part in parts)
+                or any(char in value for char in "*?[]{}")
+                or any(part.lower() in {".git", ".githooks"} for part in parts)
+            ):
+                raise ValueError(
+                    "include_paths must be safe repository-relative paths without globs"
+                )
+            if value not in seen:
+                normalized.append(value)
+                seen.add(value)
+        return normalized
 
 
 class DocumentCollectionCreate(BaseModel):
@@ -673,6 +708,10 @@ def serialize_gitlab_source(source: GitLabSource) -> dict:
 
 
 def serialize_github_source(source: GitHubSource, repository: Repository | None = None) -> dict:
+    try:
+        include_paths = json.loads(source.include_paths_json or "[]")
+    except json.JSONDecodeError:
+        include_paths = []
     return {
         "id": source.id,
         "name": source.name,
@@ -680,6 +719,10 @@ def serialize_github_source(source: GitHubSource, repository: Repository | None 
         "owner": source.owner,
         "repository": source.repository,
         "branch": source.branch,
+        "include_paths": include_paths,
+        "pinned_commit": source.pinned_commit,
+        "license_name": repository.license_name if repository else "",
+        "license_url": repository.license_url if repository else "",
         "repository_id": source.repository_id,
         "repository_status": repository.status if repository else "unknown",
         "enabled": source.enabled,
@@ -900,17 +943,26 @@ def create_github_source(payload: GitHubSourceCreate, request: Request):
             owner, repository_name = repository_identity(git_url)
             branch = validate_git_branch(payload.branch)
             if payload.visibility == "private":
+                if payload.pinned_commit:
+                    raise ValueError(
+                        "Pinned commits are currently supported for public GitHub sources"
+                    )
                 if not payload.ssh_key_id:
                     raise ValueError("Private GitHub sources require a Deploy Key")
                 key_path = resolve_deploy_key(request.app.state.settings, payload.ssh_key_id)
             else:
                 key_path = None
-            remote_commit(
-                request.app.state.settings,
-                git_url,
-                branch,
-                key_path or "",
-            )
+            if payload.pinned_commit:
+                if payload.visibility != "public":
+                    raise ValueError("Pinned commits require a public GitHub source")
+                validate_public_commit(request.app.state.settings, git_url, payload.pinned_commit)
+            else:
+                remote_commit(
+                    request.app.state.settings,
+                    git_url,
+                    branch,
+                    key_path or "",
+                )
             name = validate_repository_name(repository_name)
         except GitHubBranchNotFoundError as exc:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
@@ -930,6 +982,8 @@ def create_github_source(payload: GitHubSourceCreate, request: Request):
             git_url=git_url,
             branch=branch,
             visibility=payload.visibility,
+            license_name=payload.license_name.strip(),
+            license_url=payload.license_url.strip(),
             created_by=identity.user.id,
         )
         session.add(repo)
@@ -941,6 +995,8 @@ def create_github_source(payload: GitHubSourceCreate, request: Request):
             repository=repository_name,
             branch=branch,
             repository_id=repo.id,
+            include_paths_json=json.dumps(payload.include_paths, ensure_ascii=False),
+            pinned_commit=payload.pinned_commit.lower(),
             ssh_key_path=str(key_path) if key_path else "",
             poll_interval_seconds=payload.poll_interval_seconds,
             created_by=identity.user.id,

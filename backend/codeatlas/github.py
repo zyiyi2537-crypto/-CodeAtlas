@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import subprocess
 import time
@@ -150,3 +151,31 @@ def remote_commit(
     if not commit:
         raise GitHubBranchNotFoundError(f"GitHub branch does not exist: {branch}")
     return commit
+
+
+def validate_public_commit(settings: Settings, git_url: str, commit: str) -> str:
+    """Verify that a pinned revision exists in a public GitHub repository."""
+    validate_git_url(git_url, settings.allowed_git_hosts)
+    if not git_url.startswith("https://github.com/") or not re.fullmatch(
+        r"[0-9a-fA-F]{40}", commit
+    ):
+        raise ValueError("Pinned commits require a public GitHub URL and a 40-character SHA")
+    owner, repository = repository_identity(git_url)
+    url = f"https://api.github.com/repos/{owner}/{repository}/commits/{commit}"
+    try:
+        with httpx.Client(
+            timeout=min(settings.git_timeout_seconds, 30),
+            headers={"Accept": "application/vnd.github+json"},
+        ) as client:
+            response = client.get(url)
+        if response.status_code == 404:
+            raise ValueError("Pinned commit does not exist in the configured GitHub repository")
+        response.raise_for_status()
+        resolved = str(response.json().get("sha", ""))
+        if resolved.lower() != commit.lower():
+            raise GitHubError("GitHub API returned a different commit than the requested pin")
+        return resolved.lower()
+    except ValueError:
+        raise
+    except (httpx.HTTPError, GitHubError) as exc:
+        raise GitHubError(f"GitHub commit check failed: {str(exc)[-500:]}") from exc

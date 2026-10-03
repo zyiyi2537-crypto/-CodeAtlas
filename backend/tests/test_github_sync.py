@@ -51,6 +51,48 @@ def test_github_sync_queues_changed_commit(application, admin, monkeypatch) -> N
         assert jobs[0].message == "Queued by GitHub commit check"
 
 
+def test_github_sync_keeps_pinned_commit(application, admin, monkeypatch) -> None:
+    commit = "c" * 40
+    with Session(application.state.engine) as session:
+        repo = Repository(
+            name="pinned-repository",
+            git_url="https://github.com/example/pinned-repository.git",
+            branch="main",
+            visibility="public",
+            created_by=admin.id,
+            last_commit="old-commit",
+        )
+        session.add(repo)
+        session.flush()
+        source = GitHubSource(
+            name="pinned-source",
+            repo_url=repo.git_url,
+            owner="example",
+            repository="pinned-repository",
+            branch="main",
+            pinned_commit=commit,
+            repository_id=repo.id,
+            created_by=admin.id,
+        )
+        session.add(source)
+        session.commit()
+        source_id = source.id
+        repository_id = repo.id
+
+    def fail_if_branch_is_checked(*_args):
+        raise AssertionError("pinned sources must not follow branches")
+
+    monkeypatch.setattr("codeatlas.github_sync.remote_commit", fail_if_branch_is_checked)
+    coordinator = GitHubSyncCoordinator(application.state.settings, application.state.engine)
+
+    assert coordinator.check_source(source_id) == 1
+    with Session(application.state.engine) as session:
+        job = session.exec(
+            select(IndexJob).where(IndexJob.repository_id == repository_id)
+        ).one()
+    assert job.commit == commit
+
+
 def test_github_sync_does_not_repeat_a_failed_commit(
     application, admin, monkeypatch
 ) -> None:

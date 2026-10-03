@@ -55,6 +55,10 @@ export interface GitHubSource {
   owner: string
   repository: string
   branch: string
+  include_paths: string[]
+  pinned_commit: string
+  license_name: string
+  license_url: string
   repository_id: string
   repository_status: string
   enabled: boolean

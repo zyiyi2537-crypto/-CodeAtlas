@@ -145,6 +145,8 @@ class GitHubSource(SQLModel, table=True):
     repository_id: str = Field(
         foreign_key="repository.id", unique=True, index=True, max_length=32
     )
+    include_paths_json: str = Field(default="[]", sa_column=Column(Text, nullable=False))
+    pinned_commit: str = Field(default="", max_length=40)
     ssh_key_path: str = Field(default="", max_length=1000)
     enabled: bool = Field(default=True, index=True)
     poll_interval_seconds: int = Field(default=1800)
