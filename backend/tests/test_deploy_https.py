@@ -496,7 +496,7 @@ def test_installer_resolves_the_complete_migration_graph_without_importing_it() 
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "20260904_16"
+    assert result.stdout.strip() == "20261003_17"
 
 
 def test_bash_err_trap_defers_recovery_from_subshell_to_parent() -> None:
